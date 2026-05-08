@@ -1,0 +1,18 @@
+{
+  "octaves": [
+    {
+      "output_scale": 12.041973979288537,
+      "input_scale": 0.00808800721751076
+    },
+    {
+      "output_scale": 0.9330329915368074,
+      "input_scale": 1.0
+    },
+    {
+      "output_scale": 2.0420242514143867,
+      "input_scale": 3.1383363915870026
+    }
+  ],
+  "input_scale": 1.0,
+  "output_scale": 1.0
+}
