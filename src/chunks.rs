@@ -1,10 +1,11 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, f32::consts::TAU};
 
 use bevy::{
     asset::RenderAssetUsages,
     ecs::entity_disabling::Disabled,
     input::common_conditions::input_just_pressed,
     mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
+    platform::collections::{HashMap, HashSet},
     prelude::*,
 };
 use glam::Vec3A;
@@ -12,92 +13,18 @@ use hexasphere::shapes::IcoSphere;
 use itertools::Itertools;
 use rand::seq::IteratorRandom;
 
-use crate::uv_debug_texture;
+use crate::assets::AssetHandles;
 
-pub struct World {
-    /// Each chunk is one of the base Icosohedron faces
-    /// 0-5: Top pentagon
-    /// 5-10: Top ring
-    /// 10-15: Bottom ring
-    /// 15-20: Bottom pentagon
-    pub chunks: [Chunk; 20],
-}
-
-impl World {
-    /// Get the highest resolution chunk which contains this chunk
-    pub fn get_chunk(&self, point: Vec3A) -> &Chunk {
-        let mut root_chunk = self
-            .chunks
-            .iter()
-            .find(|c| c.contains(point))
-            .expect("There should always be a root chunk since we're a sphere");
-
-        while let Some(chunk) = root_chunk.get_sub_chunk(point) {
-            root_chunk = chunk;
-        }
-
-        root_chunk
-    }
-
-    // Get the lowest resolution chunk which shares a vertex with this one
-    // fn get_chunk_for_corner(&self, vertex: Vec3A) -> &Chunk {
-    //     let mut root_chunk = self
-    //         .chunks
-    //         .iter()
-    //         .find(|c| c.contains(vertex))
-    //         .expect("There should always be a root chunk since we're a sphere");
-    //
-    //     // Find the closest edge. If area is 0 then it's colinear
-    // }
-}
-
-impl Default for World {
-    fn default() -> Self {
-        // Base sphere
-        let sphere = IcoSphere::new(0, |_| ());
-
-        // Create chunks
-        let indices = sphere.get_all_indices();
-        let vertices = sphere.raw_points();
-
-        let chunks = indices
-            .chunks_exact(3)
-            .map(|c| {
-                let c: [_; 3] = c.try_into().unwrap();
-                let triangle = c.map(|i| vertices[i as usize]);
-
-                let midpoint = triangle.iter().sum::<Vec3A>() / 3.;
-
-                Chunk {
-                    pos: midpoint,
-                    triangle,
-                    mesh: (),
-                    sub_chunks: None,
-                }
-            })
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
-
-        Self { chunks }
-    }
-}
-
-#[derive(Debug)]
-pub struct Chunk {
-    /// Central point (unit circle)
-    pub pos: Vec3A,
-    /// Corners
-    pub triangle: [Vec3A; 3],
-    /// Mesh: Relatively high resolution compared to the chunk triangle
-    ///     Maybe 16 subdivisions?
-    mesh: (),
-    /// This chunk subdivided. Only generated when needed
-    pub sub_chunks: Option<Box<[Chunk; 4]>>,
-}
+// ========================================================
+// Trig & maths
+// ========================================================
 
 /// Area of a triangle given the 3 points
 fn area2(triangle: [Vec3A; 3]) -> f32 {
+    assert!((1. - triangle[0].length()).abs() < EPS);
+    assert!((1. - triangle[1].length()).abs() < EPS);
+    assert!((1. - triangle[2].length()).abs() < EPS);
+
     let base_mid = triangle[0].midpoint(triangle[1]);
     let height2 = (triangle[2] - base_mid).length_squared();
     let width2 = (triangle[1] - triangle[0]).length_squared();
@@ -105,159 +32,45 @@ fn area2(triangle: [Vec3A; 3]) -> f32 {
     0.25 * height2 * width2
 }
 
-impl Chunk {
-    /// Area
-    fn area(&self) -> f32 {
-        area2(self.triangle).sqrt()
-    }
+const EPS: f32 = 1e-6;
 
-    fn edges(&self) -> [(Vec3A, Vec3A); 3] {
-        self.triangle
-            .iter()
-            .cycle()
-            .map_windows(|[v0, v1]| (**v0, **v1))
-            .take(3)
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap()
-    }
-
-    /// https://en.wikipedia.org/wiki/Great-circle_distance#Vector_version
-    /// point can be anywhere in space.  
-    /// Returned value represents the "as the crow flies" distance at the height of point.
-    /// i.e. when point is higher, distance will be longer
-    fn distance(&self, point: Vec3A) -> f32 {
-        // Point above chunk at point's height
-        let pos = self.pos * point.length();
-
-        (pos.cross(point).length() / pos.dot(point)).atan()
-    }
-
-    /// Checks whether the point is contained in this chunk
-    /// https://www.baeldung.com/cs/check-if-point-is-in-2d-triangle#triangles-area-approach
-    fn contains(&self, point: Vec3A) -> bool {
-        let areas = self
-            .triangle
-            .iter()
-            .cycle()
-            .map_windows::<_, _, 2>(|&[&v0, &v1]| area2([v0, v1, point]))
-            .take(3)
-            .collect::<Vec<_>>();
-
-        areas.iter().skip(1).all(|a| *a == areas[0])
-    }
-
-    /// Finds the subchunk that contains the point, if any
-    fn get_sub_chunk(&self, point: Vec3A) -> Option<&Chunk> {
-        let Some(chunks) = &self.sub_chunks else {
-            return None;
-        };
-
-        chunks.iter().find(|c| c.contains(point))
-    }
-
-    /// Subdivides this chunk, creating 4 children
-    pub fn subdivide(&mut self) {
-        assert!(
-            self.sub_chunks.is_none(),
-            "Subdivision can only happen once!"
-        );
-
-        // Create midpoints of edges on unit sphere
-        let midpoints = self.edges().map(|(v0, v1)| v0.midpoint(v1).normalize());
-
-        // Create outer triangles
-        let outer = midpoints
-            .iter()
-            .cycle()
-            .map_windows::<_, _, 2>(|points| *points)
-            .take(3)
-            .zip(self.triangle.iter().cycle().skip(1))
-            // CCW order
-            .map(|([v0, v1], v2)| [*v2, *v1, *v0]);
-
-        // Inner triangle is just between the new midpoints
-        let inner = std::iter::once(midpoints);
-
-        // Create chunks
-        let chunks: [_; 4] = outer
-            .chain(inner)
-            .map(|triangle| {
-                // Centre, unit sphere
-                let pos = (triangle.iter().sum::<Vec3A>() / 3.).normalize();
-
-                Chunk {
-                    pos,
-                    triangle,
-                    mesh: (),
-                    sub_chunks: None,
-                }
-            })
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
-
-        self.sub_chunks = Some(Box::new(chunks))
-    }
-
-    // Gets a basic mesh of a single triangle for this chunk
-    pub fn get_mesh(&self) -> Mesh {
-        let indices = Indices::U32(vec![0, 1, 2]);
-        let positions = self
-            .triangle
-            .iter()
-            .map(|t| t.to_array())
-            .collect::<Vec<_>>();
-
-        Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::default(),
-        )
-        .with_inserted_indices(indices)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-        // .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-        .with_computed_normals()
-    }
+/// https://en.wikipedia.org/wiki/Triple_product#Properties
+fn coplanar(v0: Vec3A, v1: Vec3A, point: Vec3A) -> bool {
+    v0.cross(v1).dot(point).abs() < EPS
 }
 
-/// Subdivide a triangle using an existing vertex buffer
-/// Returns indices for the 4 new triangles, along with new vertices which need to be added to the
-/// buffer. Indices will point to new vertex indices as if they have been appended to the end.
-/// i.e. index < vertices.len() - existing vertices
-///      index >= vertices.len() - new vertices
-fn subdivide(indices: [u32; 3], vertices: &[Vec3A]) -> ([u32; 12], [Vec3A; 3]) {
-    // Create midpoints of edges on unit sphere
-    let midpoints: [_; 3] = indices
-        .map(|i| vertices[i as usize])
-        .iter()
-        .cycle()
-        .map_windows::<_, _, 2>(|[v0, v1]| v0.midpoint(**v1).normalize())
-        .take(3)
-        .collect::<Vec<_>>()
-        .try_into()
-        .unwrap();
+fn colinear(v: Vec3A, point: Vec3A) -> bool {
+    (v.dot(point) - v.length() * point.length()).abs() < EPS
+}
 
-    let inner_indices = (0..3)
-        .map(|i| vertices.len() as u32 + i)
-        .collect::<Vec<_>>();
+fn obtuse(v: Vec3A, point: Vec3A) -> bool {
+    v.dot(point) < 0.
+}
 
-    // Create outer triangles
-    let outer_indices = indices
-        .iter()
-        .cycle()
-        .map_windows::<_, _, 2>(|points| *points)
-        .take(3)
-        .zip(inner_indices.clone())
-        .map(|([i0, i1], i2)| [*i0, *i1, i2]);
+/// Project point towards the origin onto the line formed by v0-v1.
+/// v0, v1, point must be coplanar
+fn project(v0: Vec3A, v1: Vec3A, point: Vec3A) -> Vec3A {
+    let d = v1 - v0; // direction of the line
 
-    let indices: [_; 12] = outer_indices
-        .flatten()
-        .chain(inner_indices)
-        .collect::<Vec<_>>()
-        .try_into()
-        .unwrap();
+    // Solve: s * P = v0 + t*d  =>  s * P - t*d = v0
+    // Use cross products to isolate t:
+    let p_cross_d = point.cross(d);
+    let denom = p_cross_d.dot(p_cross_d); // |P × d|²
 
-    (indices, midpoints)
+    let v0_cross_d = v0.cross(d);
+    let s = v0_cross_d.dot(p_cross_d) / denom;
+
+    s * point
+}
+
+/// Cosine similarity: (a . b) / |a||b|
+fn cossim(v0: Vec3A, v1: Vec3A) -> f32 {
+    v0.dot(v1) / (v0.length_squared() * v1.length_squared()).sqrt()
+}
+
+/// Absolute angle between two vectors
+fn arc_distance(v0: Vec3A, v1: Vec3A) -> f32 {
+    cossim(v0, v1).acos()
 }
 
 // ========================================================
@@ -272,12 +85,26 @@ pub struct WorldRoot {
     /// 10-15: Bottom ring
     /// 15-20: Bottom pentagon
     root_chunks: [Entity; 20],
+
+    /// First index is from
+    /// inner indices are to
+    /// Index into above chunk array
+    siblings: [[usize; 3]; 20],
+}
+
+impl WorldRoot {
+    /// Gets the singlings for a specific base chunk
+    pub fn get_siblings(&self, chunk: Entity) -> Option<[Entity; 3]> {
+        let index = self.root_chunks.iter().position(|e| *e == chunk)?;
+        let siblings = self.siblings[index].map(|i| self.root_chunks[i]);
+        Some(siblings)
+    }
 }
 
 #[derive(Component)]
 pub struct ChunkPos(pub Vec3A);
 
-#[derive(Component, Debug)]
+#[derive(Component, Debug, Clone, Copy)]
 pub struct Triangle(pub [Vec3A; 3]);
 
 impl Triangle {
@@ -299,6 +126,17 @@ impl Triangle {
     /// Centre point on unit circle
     fn centre(&self) -> Vec3A {
         (self.0.iter().sum::<Vec3A>() / 3.).normalize()
+    }
+
+    /// Distance between centre point and edge midpoint in radians
+    fn edge_arc_radius(&self) -> f32 {
+        let edge_midpoint = self.0[0].midpoint(self.0[1]);
+
+        arc_distance(self.centre(), edge_midpoint)
+    }
+
+    fn corner_arc_radius(&self) -> f32 {
+        arc_distance(self.centre(), self.0[0])
     }
 
     /// Checks whether the point is contained in this chunk
@@ -345,14 +183,33 @@ impl Triangle {
         let indices = Indices::U32(vec![0, 1, 2]);
         let positions = self.0.iter().map(|t| t.to_array()).collect::<Vec<_>>();
 
+        // Set UV to point at the orientation of the triangle
+        let uvs = (0..3)
+            .map(|i| {
+                let angle = TAU * i as f32 / 3.;
+                let (y, x) = angle.sin_cos();
+                [y, x].map(|x| x / 2. + 0.5)
+            })
+            .collect::<Vec<_>>();
+
         Mesh::new(
             PrimitiveTopology::TriangleList,
             RenderAssetUsages::default(),
         )
         .with_inserted_indices(indices)
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-        // .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
         .with_computed_normals()
+    }
+}
+
+#[derive(Component, Debug)]
+pub struct AccTriangle(pub [Vec3A; 3]);
+
+impl AccTriangle {
+    /// Conversion for all of the methods
+    pub fn as_triangle(&self) -> Triangle {
+        Triangle(self.0)
     }
 }
 
@@ -363,6 +220,7 @@ pub struct ChunkBundle {
     pub mesh: Mesh3d,
     pub transform: Transform,
     pub material: MeshMaterial3d<StandardMaterial>,
+    pub acc_triangle: AccTriangle,
 }
 
 #[derive(Component)]
@@ -392,6 +250,7 @@ pub fn subdivide_chunk(
             mesh: Mesh3d(mesh),
             transform: Transform::IDENTITY,
             material: material.clone(),
+            acc_triangle: AccTriangle(t.0),
         }
     });
 
@@ -408,17 +267,7 @@ pub fn subdivide_chunk(
     Ok(())
 }
 
-fn init_world(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let debug_material = materials.add(StandardMaterial {
-        base_color_texture: Some(images.add(uv_debug_texture())),
-        ..default()
-    });
-
+fn init_world(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, assets: Res<AssetHandles>) {
     // Base sphere
     let sphere = IcoSphere::new(0, |_| ());
     let vertices = sphere.raw_points();
@@ -429,6 +278,30 @@ fn init_world(
         .into_iter()
         .array_chunks::<3>()
         .map(|indices| Triangle(indices.map(|i| vertices[i as usize])));
+
+    // Get adjacency LUT
+    let indices = sphere
+        .get_all_indices()
+        .into_iter()
+        .array_chunks::<3>()
+        .map(HashSet::from)
+        .collect::<Vec<_>>();
+
+    let mut siblings = [[0; 3]; 20];
+    for (i, from) in indices.iter().enumerate() {
+        let mut offset = 0;
+        for (j, to) in indices.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+
+            if from.intersection(to).count() == 2 {
+                // Shared edge, therefore siblings
+                siblings[i][offset] = j;
+                offset += 1;
+            }
+        }
+    }
 
     // Spawn shape
     let chunks = triangles
@@ -444,7 +317,8 @@ fn init_world(
                     triangle,
                     mesh: Mesh3d(mesh),
                     transform: Transform::IDENTITY,
-                    material: MeshMaterial3d(debug_material.clone()),
+                    material: MeshMaterial3d(assets.hue_material.clone()),
+                    acc_triangle: AccTriangle(triangle.0),
                 })
                 .id()
         })
@@ -453,154 +327,150 @@ fn init_world(
 
     commands.insert_resource(WorldRoot {
         root_chunks: chunks,
+        siblings,
     });
-}
-
-const EPS: f32 = 1e-6;
-
-/// https://en.wikipedia.org/wiki/Triple_product#Properties
-fn coplanar(v0: Vec3A, v1: Vec3A, point: Vec3A) -> bool {
-    v0.cross(v1).dot(point).abs() < EPS
-}
-
-fn colinear(v: Vec3A, point: Vec3A) -> bool {
-    (v.dot(point) - v.length() * point.length()).abs() < EPS
-}
-
-fn obtuse(v: Vec3A, point: Vec3A) -> bool {
-    v.dot(point) < 0.
-}
-
-/// Project point towards the origin onto the line formed by v0-v1.
-/// v0, v1, point must be coplanar
-fn project(v0: Vec3A, v1: Vec3A, point: Vec3A) -> Vec3A {
-    let d = v1 - v0; // direction of the line
-
-    // Solve: s * P = v0 + t*d  =>  s * P - t*d = v0
-    // Use cross products to isolate t:
-    let p_cross_d = point.cross(d);
-    let denom = p_cross_d.dot(p_cross_d); // |P × d|²
-
-    let v0_cross_d = v0.cross(d);
-    let s = v0_cross_d.dot(p_cross_d) / denom;
-
-    s * point
-}
-
-/// Cosine similarity: (a . b) / |a||b|
-fn cossim(v0: Vec3A, v1: Vec3A) -> f32 {
-    v0.dot(v1) / (v0.length_squared() * v1.length_squared()).sqrt()
-}
-
-/// Find the lowest LOD chunk whose edge is shared with this point
-fn find_edge(
-    world: &WorldRoot,
-    chunks: Query<(&Triangle, Option<&ChildrenChunks>, Has<Disabled>)>,
-    point: Vec3A,
-) -> Option<(Vec3A, Vec3A)> {
-    // BFS - the first one found should(?) do.
-    let mut candidate_chunks = VecDeque::from(world.root_chunks);
-    while let Some(entity) = candidate_chunks.pop_front() {
-        let (triangle, children, disabled) = chunks.get(entity).expect("Chunk should exist");
-
-        // Check that our point is somewhere vaguely between the two goalposts
-        if triangle.edges().into_iter().any(|(v0, v1)| {
-            let edge_agreement = cossim(v0, v1);
-            assert!(edge_agreement > 0.);
-
-            let v0_agreement = cossim(v0, point);
-            let v1_agreement = cossim(v1, point);
-
-            // Outside point
-            v0_agreement < edge_agreement
-                // Ontop of point
-                || 1. - v0_agreement < EPS
-                || v1_agreement < edge_agreement
-                || 1. - v1_agreement < EPS
-        }) {
-            continue;
-        }
-
-        if !triangle.contains(point) {
-            // Point outside, discard this branch
-            info!("discarding, outside triangle");
-            continue;
-        }
-
-        if disabled && let Some(children) = children {
-            // Check children instead
-            candidate_chunks.extend(children.0.clone());
-            continue;
-        }
-
-        // Check if point lies on the edge of this one
-        let edge = triangle
-            .edges()
-            .into_iter()
-            .find(|(v0, v1)| coplanar(*v0, *v1, point));
-
-        if edge.is_some() {
-            return edge;
-        }
-    }
-
-    None
 }
 
 // TODO: I need a more robust way of figuring this out. Really I should be using the chunk id/LOD
 // layer, traversing up the tetra-tree appropriately and reading out the vertices directly rather
 // than trying to do collision checks & match vertices. Floating errors are a bitch.
+//
+//  Algorithm:
+//      Given a chunk
+//      - Assume all lower LOD chunks have been processed and are at the correct height
+//      For each vertex:
+//      - Check each parent's siblings
+//      - If invisible, skip
+//      - If our vertex is within the radius of the sibling, we need to adjust this vertex
+//      - Find the two vertices of the sibling which are closest to us, and take the midpoint.
+//
+//      Base chunks don't need to be adjusted
+//      Special case handling middle triangle. Take vertices from siblings, since middle will always
+//      be processed last
+//
 fn adjust_mesh_height(
+    mut commands: Commands,
     world: Res<WorldRoot>,
-    mut mesh_handles: Query<&mut Mesh3d>,
+    mesh_handles: Query<&Mesh3d>,
     mut meshes: ResMut<Assets<Mesh>>,
-    chunks: Query<(&Triangle, Option<&ChildrenChunks>, Has<Disabled>)>,
+    mut acc_triangles: Query<&mut AccTriangle>,
+    chunks: Query<(
+        &Triangle,
+        Option<&ChildrenChunks>,
+        Option<&ChildChunk>,
+        Has<Disabled>,
+    )>,
 ) -> Result {
+    let mut queue = VecDeque::new();
+    // Add all base+1 chunks to the queue, base chunks don't need processing
+    for entity in world.root_chunks {
+        let (_, children, _, _) = chunks.get(entity)?;
+        if let Some(children) = children {
+            queue.extend(children.0.clone());
+        }
+    }
+
     // Traverse in breadth-first manner
-    let mut queue = VecDeque::from(world.root_chunks);
     while let Some(entity) = queue.pop_front() {
-        let (triangle, children, disabled) = chunks.get(entity)?;
+        let (triangle, children, parent, disabled) = chunks.get(entity)?;
+        if disabled && let Some(children) = children {
+            // This one is disabled, so it doesn't need adjusting. Adjust children instead
+            queue.extend(children.0.iter().copied());
+            continue;
+        }
+
         info!("testing: {:?} size {}", entity, triangle.area());
-        // Do special stuff, only if it's visible though
-        if !disabled {
-            let mut to_change = vec![];
 
-            for (i, &corner) in triangle.0.iter().enumerate() {
-                info!("testing corner: {:.2?}", corner);
-                if let Some(edge) = find_edge(world.as_ref(), chunks, corner) {
-                    // Project point onto edge
-                    let new_corner = project(edge.0, edge.1, corner);
-                    info!(
-                        "projected: {:.2?} onto {:.2?} -> {:.2?}",
-                        corner, edge, new_corner
-                    );
+        // Get parent
+        let parent = parent
+            .expect("All chunks except base should have a parent")
+            .0;
+        let (_, _, grandparent, _) = chunks.get(parent).expect("parent");
 
-                    to_change.push((i, new_corner));
+        // Get parent's siblings
+        let siblings = if let Some(grandparent) = grandparent {
+            // Standard chunk
+            let (_, siblings, _, _) = chunks.get(grandparent.0).expect("grandparent");
+
+            siblings
+                .expect("Just traversed up to this")
+                .0
+                .iter()
+                .copied()
+                // Only want parent' siblings, not parent
+                .filter(|e| *e != parent)
+                .collect::<Vec<_>>()
+        } else {
+            // Base chunk, need to find siblings using WorldRoot
+            world.get_siblings(parent).expect("Bad base chunk").to_vec()
+        };
+
+        let mut to_change = vec![];
+        for (i, vertex) in triangle.0.iter().copied().enumerate() {
+            for sibling in siblings.iter().copied() {
+                let sibling_acc_triangle = acc_triangles.get(entity)?.as_triangle();
+                let (sibling_triangle, _, _, sibling_disabled) = chunks.get(sibling)?;
+
+                if sibling_disabled {
+                    // Since this is disabled (not visibble), we don't need to adjust for it
+                    continue;
+                }
+
+                // Find vertex which shares an edge.
+                let edge_radius = sibling_triangle.edge_arc_radius();
+
+                let vertex_distance = arc_distance(sibling_triangle.centre(), vertex);
+                if vertex_distance < edge_radius + EPS {
+                    // This vertex is on the edge of the sibling triangle
+                    // Find the midpoint of the touching edge
+                    // let mut indices = [0, 1, 2];
+                    // indices.sort_unstable_by(|i0, i1| {
+                    //     let d0 = arc_distance(vertex, sibling_triangle.0[*i0]);
+                    //     let d1 = arc_distance(vertex, sibling_triangle.0[*i1]);
+                    //     d0.total_cmp(&d1)
+                    // });
+                    //
+                    // let midpoint = sibling_acc_triangle.0[indices[0]]
+                    //     .midpoint(sibling_acc_triangle.0[indices[1]]);
+
+                    let mut sibling_vertices = sibling_triangle.0;
+                    sibling_vertices.sort_unstable_by(|v0, v1| {
+                        arc_distance(vertex, *v0).total_cmp(&arc_distance(vertex, *v1))
+                    });
+                    let midpoint = sibling_vertices[0].midpoint(sibling_vertices[1]);
+
+                    info!("Moving vertex {vertex:?} to {midpoint:?}");
+                    to_change.push((i, midpoint));
                 }
             }
 
-            if !to_change.is_empty() {
-                let mesh = mesh_handles.get(entity)?;
-                let mesh = meshes
-                    .get_mut(mesh.id())
-                    .expect("Have a handle, so mesh should exist");
-
-                let positions = mesh
-                    .attribute_mut(Mesh::ATTRIBUTE_POSITION)
-                    .expect("Mesh should always have positions");
-                let VertexAttributeValues::Float32x3(positions) = positions else {
-                    panic!("Unexpected data type");
-                };
-
-                for (i, new_value) in to_change {
-                    positions[i] = new_value.to_array();
-                }
+            if to_change.len() == i {
+                // No change needed, so we reset to the base height
+                to_change.push((i, vertex));
             }
         }
 
-        // Add all children to the queue
-        if let Some(children) = children {
-            queue.extend(children.0.iter().copied());
+        // Apply vertex changes
+        if !to_change.is_empty() {
+            let mesh = mesh_handles.get(entity).expect("mesh");
+            let mesh = meshes
+                .get_mut(mesh.id())
+                .expect("Have a handle, so mesh should exist");
+
+            let positions = mesh
+                .attribute_mut(Mesh::ATTRIBUTE_POSITION)
+                .expect("Mesh should always have positions");
+            let VertexAttributeValues::Float32x3(positions) = positions else {
+                panic!("Unexpected data type");
+            };
+
+            let mut acc_triangle = acc_triangles.get_mut(entity)?;
+            for (i, new_value) in to_change {
+                // Update mesh
+                positions[i] = new_value.to_array();
+                // Update acc triangle
+                acc_triangle.0[i] = new_value;
+            }
         }
     }
 
@@ -642,27 +512,7 @@ mod tests {
 
     use glam::Vec3A;
 
-    use super::Chunk;
     use crate::chunks::coplanar;
-
-    #[test]
-    fn test_chunk_subdivision() {
-        let mut chunk = Chunk {
-            pos: Vec3A::ZERO,
-            triangle: [
-                Vec3A::new(1., 0., 1.).normalize(), // right
-                Vec3A::new((TAU / 3.).cos(), (TAU / 3.).sin(), 1.).normalize(), // up left
-                Vec3A::new((2. * TAU / 3.).cos(), (2. * TAU / 3.).sin(), 1.).normalize(), // down left
-            ],
-            mesh: (),
-            sub_chunks: None,
-        };
-
-        println!("{:#.2?}", chunk);
-        chunk.subdivide();
-        println!("{:#.2?}", chunk);
-        // panic!()
-    }
 
     #[test]
     fn test_coplanar() {

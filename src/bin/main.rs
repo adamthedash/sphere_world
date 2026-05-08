@@ -10,6 +10,7 @@ use bevy_egui::{egui::Slider, prelude::*};
 use glam::Vec3A;
 use hexasphere::shapes::IcoSphere;
 use sphere_world::{
+    assets::load_assets,
     chunks::ChunkPlugin,
     noise::{NoiseChanged, NoiseConfig, NoiseConfigWidget},
     polar::PolarCoord,
@@ -88,7 +89,7 @@ fn setup(mut commands: Commands) {
             shadow_depth_bias: 0.2,
             ..default()
         },
-        Transform::from_xyz(8.0, 16.0, 8.0),
+        Transform::from_xyz(10., 10., 10.),
     ));
 
     // Camera
@@ -146,14 +147,16 @@ fn draw_ui(
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
-        //
+        // Wireframe
         .add_plugins(WireframePlugin::default())
         .add_systems(Startup, |mut c: ResMut<WireframeConfig>| c.global = true)
-        //
+        // UI
         .add_plugins(EguiPlugin::default())
         .add_systems(EguiPrimaryContextPass, draw_ui)
         .insert_resource(ClearColor(Color::BLACK))
-        //
+        // Assets
+        .add_systems(PreStartup, load_assets)
+        // Chunks
         .add_plugins(ChunkPlugin)
         //
         .insert_resource(NoiseConfig::default())

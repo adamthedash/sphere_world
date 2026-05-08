@@ -1,4 +1,4 @@
-use bevy_egui::egui::{DragValue, Response, Slider, Ui, Widget};
+use bevy_egui::egui::{DragValue, Response, Ui, Widget};
 
 /// Log-scaled drag value. Only updates source value when it has changed
 pub struct LogDragValue<'a, F> {

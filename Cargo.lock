@@ -5021,6 +5021,7 @@ name = "sphere_world"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bevy_ecs",
  "bevy_egui",
  "env_logger",
  "glam 0.32.1",

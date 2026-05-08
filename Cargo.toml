@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bevy = {version = "0.18", features= ["dynamic_linking"]}
+bevy_ecs = "0.18.1"
 bevy_egui = "0.39"
 env_logger = "0.11.10"
 glam = "0.32.1"
