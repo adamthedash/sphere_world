@@ -379,8 +379,6 @@ fn adjust_mesh_height(
             continue;
         }
 
-        info!("testing: {:?} size {}", entity, triangle.area());
-
         // Get parent
         let parent = parent
             .expect("All chunks except base should have a parent")
@@ -407,15 +405,31 @@ fn adjust_mesh_height(
 
         let mut to_change = vec![];
         for (i, vertex) in triangle.0.iter().copied().enumerate() {
+            // Find the first sibling who I either share a vertex with, or my vertex is on their
+            // edge.
+
             for sibling in siblings.iter().copied() {
-                let sibling_acc_triangle = acc_triangles.get(entity)?.as_triangle();
                 let (sibling_triangle, _, _, sibling_disabled) = chunks.get(sibling)?;
 
                 if sibling_disabled {
-                    // Since this is disabled (not visibble), we don't need to adjust for it
+                    // Since this is disabled (not visible), we don't need to adjust for it
                     continue;
                 }
 
+                let sibling_acc_triangle = acc_triangles.get(sibling)?.as_triangle();
+
+                // 1# Check for shared vertex
+                let shared_vertex = sibling_triangle
+                    .0
+                    .iter()
+                    .position(|v| arc_distance(vertex, *v) < EPS);
+                if let Some(i_sib) = shared_vertex {
+                    // Just take the acc vertex as-is
+                    to_change.push((i, sibling_acc_triangle.0[i_sib]));
+                    break;
+                }
+
+                // #2 Check for edge-vertex
                 // Find vertex which shares an edge.
                 let edge_radius = sibling_triangle.edge_arc_radius();
 
@@ -423,24 +437,18 @@ fn adjust_mesh_height(
                 if vertex_distance < edge_radius + EPS {
                     // This vertex is on the edge of the sibling triangle
                     // Find the midpoint of the touching edge
-                    // let mut indices = [0, 1, 2];
-                    // indices.sort_unstable_by(|i0, i1| {
-                    //     let d0 = arc_distance(vertex, sibling_triangle.0[*i0]);
-                    //     let d1 = arc_distance(vertex, sibling_triangle.0[*i1]);
-                    //     d0.total_cmp(&d1)
-                    // });
-                    //
-                    // let midpoint = sibling_acc_triangle.0[indices[0]]
-                    //     .midpoint(sibling_acc_triangle.0[indices[1]]);
-
-                    let mut sibling_vertices = sibling_triangle.0;
-                    sibling_vertices.sort_unstable_by(|v0, v1| {
-                        arc_distance(vertex, *v0).total_cmp(&arc_distance(vertex, *v1))
+                    let mut indices = [0, 1, 2];
+                    indices.sort_unstable_by(|i0, i1| {
+                        let d0 = arc_distance(vertex, sibling_triangle.0[*i0]);
+                        let d1 = arc_distance(vertex, sibling_triangle.0[*i1]);
+                        d0.total_cmp(&d1)
                     });
-                    let midpoint = sibling_vertices[0].midpoint(sibling_vertices[1]);
 
-                    info!("Moving vertex {vertex:?} to {midpoint:?}");
+                    let midpoint = sibling_acc_triangle.0[indices[0]]
+                        .midpoint(sibling_acc_triangle.0[indices[1]]);
+
                     to_change.push((i, midpoint));
+                    break;
                 }
             }
 
