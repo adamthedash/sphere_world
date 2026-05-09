@@ -463,29 +463,33 @@ fn adjust_mesh_height(
 
                     // Triangle (in)equality
                     if ((angle_v0_vertex + angle_v1_vertex) - angle_v0_v1).abs() < EPS {
-                        info!("vecs: v0 {:.2?} v1 {:.2?} v {:.2?}", v0, v1, vertex);
                         // We're on the edge somewhere
                         // Solve for project vertex length using ASA triangle rules
                         let angle_a = angle_v1_vertex;
                         let angle_b = arc_distance(v1, v1 - v0);
                         let angle_c = PI - angle_b - angle_a;
-                        info!(
-                            "angles: v1-v {:.2} v1-(v0->v1) {:.2} -v0-(v0->v1) {:.2}",
-                            angle_a.to_degrees(),
-                            angle_b.to_degrees(),
-                            angle_c.to_degrees()
-                        );
 
                         let length_c = v1.length();
                         let length_b = length_c * angle_b.sin() / angle_c.sin();
                         let projected_vertex = vertex.normalize() * length_b;
-                        info!(
-                            "lengths: {:.2?} - {:.2?}  -> {:.2?} (len {:.2?})",
-                            vertex.length(),
-                            length_b,
-                            projected_vertex,
-                            projected_vertex.length()
-                        );
+
+                        if length_b > 1. - EPS {
+                            // This is bad.
+                            info!("vecs: v0 {:.2?} v1 {:.2?} v {:.2?}", v0, v1, vertex);
+                            info!(
+                                "angles: v1-v {:.2} v1-(v0->v1) {:.2} -v0-(v0->v1) {:.2}",
+                                angle_a.to_degrees(),
+                                angle_b.to_degrees(),
+                                angle_c.to_degrees()
+                            );
+                            info!(
+                                "lengths: {:.2?} - {:.2?}  -> {:.2?} (len {:.2?})",
+                                vertex.length(),
+                                length_b,
+                                projected_vertex,
+                                projected_vertex.length()
+                            );
+                        }
 
                         to_change.push((i, projected_vertex));
                         break 'outer;
@@ -528,13 +532,17 @@ fn adjust_mesh_height(
 
 fn subdivide_random_chunks(
     mut commands: Commands,
-    chunks: Query<Entity, (With<Triangle>, Without<ChildrenChunks>)>,
+    chunks: Query<(Entity, &Triangle), Without<ChildrenChunks>>,
 ) {
     const MAX_CHUNKS: usize = 1;
+    const MIN_RADIUS: f32 = 0.05;
 
     let mut rng = rand::rng();
-    let indices = chunks.iter().sample(&mut rng, MAX_CHUNKS);
-    indices.into_iter().for_each(|e| {
+    let indices = chunks
+        .iter()
+        .filter(|(_, t)| t.corner_arc_radius() >= MIN_RADIUS)
+        .sample(&mut rng, MAX_CHUNKS);
+    indices.into_iter().for_each(|(e, _)| {
         commands.trigger(SubdivideChunk(e));
     });
 }
