@@ -439,7 +439,7 @@ fn adjust_mesh_height(
             // edge.
 
             'outer: for sibling in siblings.iter().copied() {
-                let (sibling_triangle, _, _, sibling_disabled) = chunks.get(sibling)?;
+                let (sibling_triangle, _, _, _) = chunks.get(sibling)?;
 
                 let sibling_acc_triangle = acc_triangles.get(sibling)?.as_triangle();
 

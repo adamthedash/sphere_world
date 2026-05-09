@@ -2,7 +2,7 @@ use std::path::Path;
 
 use bevy::{
     ecs::error::Result,
-    input::mouse::AccumulatedMouseMotion,
+    input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll},
     pbr::wireframe::{WireframeConfig, WireframePlugin},
     prelude::*,
 };
@@ -32,6 +32,18 @@ fn drag_camera(
     );
     let rot = r2.mul_quat(r1);
     camera.rotate_around(Vec3::ZERO, rot);
+}
+
+fn zoom_camera(
+    mut camera: Single<&mut Transform, With<Camera3d>>,
+    time: Res<Time>,
+    mouse: Res<AccumulatedMouseScroll>,
+) {
+    const SPEED: f32 = 0.1;
+
+    let direction = camera.translation * -1.;
+    let displacement = direction * mouse.delta.y * time.delta_secs() * SPEED;
+    camera.translation += displacement;
 }
 
 struct SphereData {
@@ -163,6 +175,6 @@ fn main() {
         .add_systems(Startup, setup)
         .insert_resource(ShouldRegenerateMesh(true))
         .add_message::<NoiseChanged>()
-        .add_systems(Update, drag_camera)
+        .add_systems(Update, (drag_camera, zoom_camera))
         .run();
 }
