@@ -1,4 +1,7 @@
-use std::{collections::VecDeque, f32::consts::TAU};
+use std::{
+    collections::VecDeque,
+    f32::consts::{PI, TAU},
+};
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -225,10 +228,10 @@ pub struct ChunkBundle {
 
 #[derive(Component)]
 #[relationship(relationship_target = ChildrenChunks)]
-pub struct ChildChunk(Entity);
+pub struct ParentChunk(Entity);
 
 #[derive(Component)]
-#[relationship_target(relationship = ChildChunk)]
+#[relationship_target(relationship = ParentChunk)]
 pub struct ChildrenChunks(Vec<Entity>);
 
 #[derive(EntityEvent)]
@@ -260,7 +263,7 @@ pub fn subdivide_chunk(
     // Add children to this chunk
     commands
         .entity(event.0)
-        .add_related::<ChildChunk>(&children)
+        .add_related::<ParentChunk>(&children)
         // Make the parent invisible
         .insert(Disabled);
 
@@ -331,6 +334,53 @@ fn init_world(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, assets: 
     });
 }
 
+/// Iterate over all non-disabled uncles
+fn iter_uncles(
+    entity: Entity,
+    world: &WorldRoot,
+    relationships: Query<(Option<&ChildrenChunks>, Option<&ParentChunk>, Has<Disabled>)>,
+) -> Vec<Entity> {
+    // Base - stop
+    // Base+1 - parent -> base siblings
+    // Base+N - parent -> parent -> children
+
+    let (_, parent, _) = relationships.get(entity).unwrap();
+    let Some(parent) = parent else {
+        // e == base
+        return vec![];
+    };
+
+    let (_, grandparent, _) = relationships.get(parent.0).expect("parent");
+    let mut uncles = if let Some(grandparent) = grandparent {
+        // e == base + N
+        let (uncs, _, _) = relationships.get(grandparent.0).expect("grandparent");
+
+        uncs.expect("Just traversed up to this")
+            .0
+            .iter()
+            .copied()
+            // Only want parent' siblings, not parent
+            .filter(|e| *e != parent.0)
+            .collect::<Vec<_>>()
+    } else {
+        // e == base +1
+        world
+            .get_siblings(parent.0)
+            .expect("Bad base chunk")
+            .to_vec()
+    };
+
+    // Get rid of disabled uncles
+    uncles.retain(|e| {
+        let (_, _, disabled) = relationships.get(*e).unwrap();
+        !disabled
+    });
+
+    uncles.extend(iter_uncles(parent.0, world, relationships));
+
+    uncles
+}
+
 // TODO: I need a more robust way of figuring this out. Really I should be using the chunk id/LOD
 // layer, traversing up the tetra-tree appropriately and reading out the vertices directly rather
 // than trying to do collision checks & match vertices. Floating errors are a bitch.
@@ -357,9 +407,10 @@ fn adjust_mesh_height(
     chunks: Query<(
         &Triangle,
         Option<&ChildrenChunks>,
-        Option<&ChildChunk>,
+        Option<&ParentChunk>,
         Has<Disabled>,
     )>,
+    relationships: Query<(Option<&ChildrenChunks>, Option<&ParentChunk>, Has<Disabled>)>,
 ) -> Result {
     let mut queue = VecDeque::new();
     // Add all base+1 chunks to the queue, base chunks don't need processing
@@ -372,49 +423,23 @@ fn adjust_mesh_height(
 
     // Traverse in breadth-first manner
     while let Some(entity) = queue.pop_front() {
-        let (triangle, children, parent, disabled) = chunks.get(entity)?;
+        let (triangle, children, _, disabled) = chunks.get(entity)?;
         if disabled && let Some(children) = children {
             // This one is disabled, so it doesn't need adjusting. Adjust children instead
             queue.extend(children.0.iter().copied());
             continue;
         }
 
-        // Get parent
-        let parent = parent
-            .expect("All chunks except base should have a parent")
-            .0;
-        let (_, _, grandparent, _) = chunks.get(parent).expect("parent");
-
-        // Get parent's siblings
-        let siblings = if let Some(grandparent) = grandparent {
-            // Standard chunk
-            let (_, siblings, _, _) = chunks.get(grandparent.0).expect("grandparent");
-
-            siblings
-                .expect("Just traversed up to this")
-                .0
-                .iter()
-                .copied()
-                // Only want parent' siblings, not parent
-                .filter(|e| *e != parent)
-                .collect::<Vec<_>>()
-        } else {
-            // Base chunk, need to find siblings using WorldRoot
-            world.get_siblings(parent).expect("Bad base chunk").to_vec()
-        };
+        // Get list of active uncles, sorted upwards
+        let siblings = iter_uncles(entity, &world, relationships);
 
         let mut to_change = vec![];
         for (i, vertex) in triangle.0.iter().copied().enumerate() {
             // Find the first sibling who I either share a vertex with, or my vertex is on their
             // edge.
 
-            for sibling in siblings.iter().copied() {
+            'outer: for sibling in siblings.iter().copied() {
                 let (sibling_triangle, _, _, sibling_disabled) = chunks.get(sibling)?;
-
-                if sibling_disabled {
-                    // Since this is disabled (not visible), we don't need to adjust for it
-                    continue;
-                }
 
                 let sibling_acc_triangle = acc_triangles.get(sibling)?.as_triangle();
 
@@ -431,24 +456,40 @@ fn adjust_mesh_height(
 
                 // #2 Check for edge-vertex
                 // Find vertex which shares an edge.
-                let edge_radius = sibling_triangle.edge_arc_radius();
+                for (v0, v1) in sibling_acc_triangle.edges() {
+                    let angle_v0_v1 = arc_distance(v0, v1);
+                    let angle_v0_vertex = arc_distance(v0, vertex);
+                    let angle_v1_vertex = arc_distance(vertex, v1);
 
-                let vertex_distance = arc_distance(sibling_triangle.centre(), vertex);
-                if vertex_distance < edge_radius + EPS {
-                    // This vertex is on the edge of the sibling triangle
-                    // Find the midpoint of the touching edge
-                    let mut indices = [0, 1, 2];
-                    indices.sort_unstable_by(|i0, i1| {
-                        let d0 = arc_distance(vertex, sibling_triangle.0[*i0]);
-                        let d1 = arc_distance(vertex, sibling_triangle.0[*i1]);
-                        d0.total_cmp(&d1)
-                    });
+                    // Triangle (in)equality
+                    if ((angle_v0_vertex + angle_v1_vertex) - angle_v0_v1).abs() < EPS {
+                        info!("vecs: v0 {:.2?} v1 {:.2?} v {:.2?}", v0, v1, vertex);
+                        // We're on the edge somewhere
+                        // Solve for project vertex length using ASA triangle rules
+                        let angle_a = angle_v1_vertex;
+                        let angle_b = arc_distance(v1, v1 - v0);
+                        let angle_c = PI - angle_b - angle_a;
+                        info!(
+                            "angles: v1-v {:.2} v1-(v0->v1) {:.2} -v0-(v0->v1) {:.2}",
+                            angle_a.to_degrees(),
+                            angle_b.to_degrees(),
+                            angle_c.to_degrees()
+                        );
 
-                    let midpoint = sibling_acc_triangle.0[indices[0]]
-                        .midpoint(sibling_acc_triangle.0[indices[1]]);
+                        let length_c = v1.length();
+                        let length_b = length_c * angle_b.sin() / angle_c.sin();
+                        let projected_vertex = vertex.normalize() * length_b;
+                        info!(
+                            "lengths: {:.2?} - {:.2?}  -> {:.2?} (len {:.2?})",
+                            vertex.length(),
+                            length_b,
+                            projected_vertex,
+                            projected_vertex.length()
+                        );
 
-                    to_change.push((i, midpoint));
-                    break;
+                        to_change.push((i, projected_vertex));
+                        break 'outer;
+                    }
                 }
             }
 
@@ -516,11 +557,11 @@ impl Plugin for ChunkPlugin {
 
 #[cfg(test)]
 mod tests {
-    use std::f32::consts::TAU;
+    use std::f32::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI, TAU};
 
     use glam::Vec3A;
 
-    use crate::chunks::coplanar;
+    use crate::chunks::{EPS, arc_distance, coplanar};
 
     #[test]
     fn test_coplanar() {
@@ -539,5 +580,40 @@ mod tests {
         );
 
         assert!(coplanar(a, b, c), "{:?}, {:?}, {:?}", a, b, c);
+    }
+
+    fn almost_equal(a: f32, b: f32) -> bool {
+        (a - b).abs() < EPS
+    }
+
+    #[test]
+    fn test_arc_dist() {
+        // Unit length
+        let a = Vec3A::Y;
+        let b = Vec3A::X;
+        assert!(almost_equal(arc_distance(a, b), FRAC_PI_2));
+        let a = Vec3A::X;
+        assert!(almost_equal(arc_distance(a, b), 0.));
+        let a = Vec3A::NEG_X;
+        assert!(almost_equal(arc_distance(a, b), PI));
+
+        // Different length
+        let a = Vec3A::Y;
+        let b = Vec3A::X * 2.45;
+        assert!(almost_equal(arc_distance(a, b), FRAC_PI_2));
+        let a = Vec3A::X;
+        assert!(almost_equal(arc_distance(a, b), 0.));
+        let a = Vec3A::NEG_X;
+        assert!(almost_equal(arc_distance(a, b), PI));
+
+        // Off-axis
+        let a = Vec3A::new(1., 1., 1.).normalize();
+        let b = Vec3A::new(1., 1., -1.);
+        assert!(
+            almost_equal(arc_distance(a, b), FRAC_1_SQRT_2.atan() * 2.),
+            "{} {}",
+            arc_distance(a, b),
+            FRAC_1_SQRT_2.atan()
+        );
     }
 }
