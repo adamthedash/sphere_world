@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    f32::consts::{FRAC_PI_2, PI, TAU},
+    f32::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, FRAC_PI_6, FRAC_PI_8, PI, TAU},
 };
 
 use bevy::{
@@ -633,18 +633,23 @@ fn subdivide_close_chunks(
         .iter()
         .filter(|(_, t, _)| t.corner_arc_radius() >= MIN_RADIUS)
         .filter(|(_, t, l)| {
-            let distance = arc_distance(t.centre(), camera.translation.to_vec3a());
-            match l.0 {
-                // 90
-                0 => distance < FRAC_PI_2,
-                // 45
-                1 => distance < FRAC_PI_2 / 2.,
-                // 22.5
-                2 => distance < FRAC_PI_2 / 4.,
-                // 15
-                // 3 => distance < FRAC_PI_2 / 6.,
-                _ => false,
-            }
+            // Nearest vertex
+            let distance =
+                t.0.iter()
+                    .map(|&v| arc_distance(v, camera.translation.to_vec3a()))
+                    .min_by(f32::total_cmp)
+                    .unwrap();
+
+            let lod_borders = [
+                FRAC_PI_2, // L0 - 90+ degrees
+                FRAC_PI_4, // L1 - 45+ degrees
+                FRAC_PI_8, // L2 - 22.5+ degrees
+                           // L3+ - 0+ degrees
+            ];
+
+            let border = *lod_borders.get(l.0).unwrap_or(&0.);
+
+            distance < border
         })
         .for_each(|(e, _, _)| {
             debug!("Subdividing chunk: {e:?}");
@@ -655,9 +660,15 @@ fn subdivide_close_chunks(
 /// Show higher LODs near, lower LODs far
 fn toggle_lods(
     camera: Single<&Transform, With<Player>>,
-    chunks: Query<(Entity, &Triangle, &SubdivisionLevel, &mut Visibility)>,
-) {
-    for (entity, triangle, level, mut visible) in chunks {
+    world: Res<WorldRoot>,
+    mut chunks: Query<(&Triangle, &SubdivisionLevel, &mut Visibility)>,
+    children: Query<&ChildrenChunks>,
+) -> Result {
+    let mut queue = VecDeque::from(world.root_chunks);
+
+    while let Some(entity) = queue.pop_front() {
+        let (triangle, level, mut visible) = chunks.get_mut(entity)?;
+
         // Nearest vertex
         let distance = triangle
             .0
@@ -666,40 +677,45 @@ fn toggle_lods(
             .min_by(f32::total_cmp)
             .unwrap();
 
-        let show_ranges = [
-            // Level 0: 90+ degrees
-            FRAC_PI_2..f32::INFINITY,
-            // Level 1: 45-90 degrees
-            (FRAC_PI_2 / 2.)..FRAC_PI_2,
-            // Level 2: 22.5-45 degrees
-            (FRAC_PI_2 / 4.)..(FRAC_PI_2 / 2.),
+        let lod_borders = [
+            FRAC_PI_2, // 90+ degrees
+            // FRAC_PI_3, // 60+ degrees
+            FRAC_PI_4, // 45+ degrees
+            // FRAC_PI_6, // 30+ degrees
+            FRAC_PI_8, // 22.5+ degrees
+                       // 0+ degrees
         ];
 
-        let should_show = show_ranges
-            .get(level.0)
-            .map(|r| r.contains(&distance))
-            // Anything closer shown by default
-            .unwrap_or_else(|| {
-                let range = show_ranges.last().unwrap();
-                distance < range.start
-            });
+        let border = *lod_borders.get(level.0).unwrap_or(&0.);
 
-        match (*visible, should_show) {
-            (Visibility::Hidden, true) => {
-                // Remove disabled
-                debug!("showing chunk {entity:?}");
-                *visible = Visibility::Visible;
+        let should_show = distance >= border;
+
+        if should_show {
+            // Show self
+            debug!("showing chunk {entity:?}");
+            *visible = Visibility::Visible;
+
+            // Hide all descendents
+            for child in children.iter_descendants(entity) {
+                let (_, _, mut visible) = chunks.get_mut(child)?;
+                if matches!(*visible, Visibility::Visible) {
+                    debug!("hiding child chunk {entity:?}");
+                    *visible = Visibility::Hidden;
+                }
             }
-            (Visibility::Visible, false) => {
-                // Add disabled
-                debug!("hiding chunk {entity:?}");
-                *visible = Visibility::Hidden;
-            }
-            _ => {
-                // Already in correct state
+        } else {
+            // Hide self
+            debug!("hiding chunk {entity:?}");
+            *visible = Visibility::Hidden;
+
+            // Queue all children for checking
+            if let Ok(children) = children.get(entity) {
+                queue.extend(children.0.clone());
             }
         }
     }
+
+    Ok(())
 }
 
 fn draw_gizmos(mut gizmos: Gizmos, chunks: Query<(Entity, &AccTriangle)>) {
@@ -798,10 +814,7 @@ impl Plugin for ChunkPlugin {
             // Automagic LOD stuff
             .add_systems(
                 Update,
-                (
-                    subdivide_close_chunks,
-                    (toggle_lods, adjust_mesh_height).chain(),
-                ),
+                ((subdivide_close_chunks, toggle_lods, adjust_mesh_height).chain(),),
             )
             .add_systems(Startup, init_player)
             .add_systems(Update, move_player);
