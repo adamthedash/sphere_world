@@ -324,7 +324,7 @@ pub fn subdivide_chunk(
             .id()
     });
 
-    info!("Subdivided chunk {:?} -> {:?}", event.0, children);
+    debug!("Subdivided chunk {:?} -> {:?}", event.0, children);
 
     // Add debug text
     children.iter().zip(new_triangles).for_each(|(e, t)| {
@@ -622,16 +622,25 @@ fn subdivide_smallest_chunks(
         });
 }
 
+const LOD_BORDERS: [f32; 5] = [
+    FRAC_PI_2, // 90+ degrees
+    FRAC_PI_3, // 60+ degrees
+    FRAC_PI_4, // 45+ degrees
+    FRAC_PI_6, // 30+ degrees
+    FRAC_PI_8, // 22.5+ degrees
+               // 0+ degrees
+]
+.map(const |x| x / 2.);
+const MAX_LOD_LEVEL: usize = LOD_BORDERS.len() + 1;
+
 fn subdivide_close_chunks(
     mut commands: Commands,
     camera: Single<&Transform, With<Player>>,
     chunks: Query<(Entity, &Triangle, &SubdivisionLevel), Without<ChildrenChunks>>,
 ) {
-    const MIN_RADIUS: f32 = 0.05;
-
     chunks
         .iter()
-        .filter(|(_, t, _)| t.corner_arc_radius() >= MIN_RADIUS)
+        .filter(|(_, _, l)| l.0 < MAX_LOD_LEVEL)
         .filter(|(_, t, l)| {
             // Nearest vertex
             let distance =
@@ -640,14 +649,7 @@ fn subdivide_close_chunks(
                     .min_by(f32::total_cmp)
                     .unwrap();
 
-            let lod_borders = [
-                FRAC_PI_2, // L0 - 90+ degrees
-                FRAC_PI_4, // L1 - 45+ degrees
-                FRAC_PI_8, // L2 - 22.5+ degrees
-                           // L3+ - 0+ degrees
-            ];
-
-            let border = *lod_borders.get(l.0).unwrap_or(&0.);
+            let border = *LOD_BORDERS.get(l.0).unwrap_or(&0.);
 
             distance < border
         })
@@ -677,16 +679,7 @@ fn toggle_lods(
             .min_by(f32::total_cmp)
             .unwrap();
 
-        let lod_borders = [
-            FRAC_PI_2, // 90+ degrees
-            // FRAC_PI_3, // 60+ degrees
-            FRAC_PI_4, // 45+ degrees
-            // FRAC_PI_6, // 30+ degrees
-            FRAC_PI_8, // 22.5+ degrees
-                       // 0+ degrees
-        ];
-
-        let border = *lod_borders.get(level.0).unwrap_or(&0.);
+        let border = *LOD_BORDERS.get(level.0).unwrap_or(&0.);
 
         let should_show = distance >= border;
 
