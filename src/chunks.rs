@@ -5,13 +5,12 @@ use std::{
 
 use bevy::{
     asset::RenderAssetUsages,
-    ecs::entity_disabling::Disabled,
     input::common_conditions::input_just_pressed,
     mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
     platform::collections::HashSet,
     prelude::*,
 };
-use glam::{Mat2, Mat3A, Vec2, Vec3A};
+use glam::{Vec2, Vec3A};
 use hexasphere::shapes::IcoSphere;
 use itertools::Itertools;
 use num::{One, ToPrimitive, Zero};
@@ -318,7 +317,14 @@ pub fn subdivide_chunk(
     });
 
     // Spawn chunk x4
-    let children = new_bundles.map(|b| commands.spawn(b).id());
+    let children = new_bundles.map(|b| {
+        commands
+            // Spawn as disabled so we don't get flickering when they're hidden next frame
+            .spawn((b, Visibility::Hidden))
+            .id()
+    });
+
+    info!("Subdivided chunk {:?} -> {:?}", event.0, children);
 
     // Add debug text
     children.iter().zip(new_triangles).for_each(|(e, t)| {
@@ -332,9 +338,7 @@ pub fn subdivide_chunk(
     // Add children to this chunk
     commands
         .entity(event.0)
-        .add_related::<ParentChunk>(&children)
-        // Make the parent invisible
-        .insert(Disabled);
+        .add_related::<ParentChunk>(&children);
 
     Ok(())
 }
@@ -384,15 +388,18 @@ fn init_world(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, assets: 
             let pos = triangle.centre();
 
             commands
-                .spawn(ChunkBundle {
-                    pos: ChunkPos(pos),
-                    triangle,
-                    mesh: Mesh3d(mesh),
-                    transform: Transform::IDENTITY,
-                    material: MeshMaterial3d(assets.hue_material.clone()),
-                    acc_triangle: AccTriangle(triangle.0),
-                    subdivision: SubdivisionLevel(0),
-                })
+                .spawn((
+                    ChunkBundle {
+                        pos: ChunkPos(pos),
+                        triangle,
+                        mesh: Mesh3d(mesh),
+                        transform: Transform::IDENTITY,
+                        material: MeshMaterial3d(assets.hue_material.clone()),
+                        acc_triangle: AccTriangle(triangle.0),
+                        subdivision: SubdivisionLevel(0),
+                    },
+                    Visibility::Hidden,
+                ))
                 .id()
         })
         .collect_array()
@@ -413,7 +420,7 @@ fn iter_adjacent(
         &Triangle,
         &SubdivisionLevel,
         Option<&ChildrenChunks>,
-        Has<Disabled>,
+        &Visibility,
     )>,
 ) -> Vec<Entity> {
     let mut queue = VecDeque::from(world.root_chunks);
@@ -422,7 +429,7 @@ fn iter_adjacent(
 
     let mut chunks = vec![];
     while let Some(candidate) = queue.pop_front() {
-        let (triangle, level, children, disabled) = relationships.get(candidate).unwrap();
+        let (triangle, level, children, visible) = relationships.get(candidate).unwrap();
 
         let cmp = test_triangle
             .0
@@ -447,14 +454,14 @@ fn iter_adjacent(
             [_, _, 3.., _] |
             // Ancestor corner
             [_, 1, 2, _] => {
-                assert!(
-                    disabled,
-                    "Ancestor chunks should be disabled {:?}",
-                    (entity, candidate)
-                );
+                let cmp_pretty = "OCEI".chars().zip(cmp_counts)
+                    .filter(|(_, n)| *n > 0)
+                    .map(|(c, n)| format!("{c}{n} "))
+                    .collect::<String>();
+                debug!("{:?} --[ancestor of]-> {:?} {}", candidate, entity, cmp_pretty);
+
                 let children = children.expect("Ancestor chunks must have children");
                 queue.extend(children.0.iter().copied());
-
             }
 
             // Direct sibling
@@ -465,13 +472,12 @@ fn iter_adjacent(
             [1, _, 2, _] |
             // Corner on edge but not adjacent
             [2, _, 1, _] => {
-                if disabled {
-                    // Adjacent disabled chunk
-                    let children = children.expect("Ancestor chunks must have children");
-                    queue.extend(children.0.iter().copied());
+                if matches!(visible, Visibility::Hidden) {
+                    if let Some(children) = children {
+                        queue.extend(children.0.iter().copied());
+                    }
                 } else {
                     // Adjacent enabled Leaf chunk
-                    assert!(children.is_none(), "Enabled chunks should be leaves");
                     chunks.push(candidate);
                 }
             }
@@ -493,25 +499,7 @@ fn iter_adjacent(
     chunks
 }
 
-// TODO: I need a more robust way of figuring this out. Really I should be using the chunk id/LOD
-// layer, traversing up the tetra-tree appropriately and reading out the vertices directly rather
-// than trying to do collision checks & match vertices. Floating errors are a bitch.
-//
-//  Algorithm:
-//      Given a chunk
-//      - Assume all lower LOD chunks have been processed and are at the correct height
-//      For each vertex:
-//      - Check each parent's siblings
-//      - If invisible, skip
-//      - If our vertex is within the radius of the sibling, we need to adjust this vertex
-//      - Find the two vertices of the sibling which are closest to us, and take the midpoint.
-//
-//      Base chunks don't need to be adjusted
-//      Special case handling middle triangle. Take vertices from siblings, since middle will always
-//      be processed last
-//
 fn adjust_mesh_height(
-    _commands: Commands,
     world: Res<WorldRoot>,
     mesh_handles: Query<&Mesh3d>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -521,13 +509,13 @@ fn adjust_mesh_height(
         &SubdivisionLevel,
         Option<&ChildrenChunks>,
         Option<&ParentChunk>,
-        Has<Disabled>,
+        &Visibility,
     )>,
     relationships: Query<(
         &Triangle,
         &SubdivisionLevel,
         Option<&ChildrenChunks>,
-        Has<Disabled>,
+        &Visibility,
     )>,
 ) -> Result {
     let mut queue = VecDeque::new();
@@ -541,27 +529,23 @@ fn adjust_mesh_height(
 
     // Traverse in breadth-first manner
     while let Some(entity) = queue.pop_front() {
-        let (triangle, level, children, _, disabled) = chunks.get(entity)?;
+        let (triangle, level, children, _, visible) = chunks.get(entity)?;
 
-        if disabled && let Some(children) = children {
+        if matches!(visible, Visibility::Hidden)
+            && let Some(children) = children
+        {
             // This one is disabled, so it doesn't need adjusting. Adjust children instead
             queue.extend(children.0.iter().copied());
             continue;
         }
-        println!("=========================================================");
-        println!("adjusting {:?}", entity);
-        println!("triangle {:?}", triangle);
 
         // Get list of active adjacent chunks
         let siblings = iter_adjacent(entity, &world, relationships);
-        println!("siblings: {:?}", siblings);
 
         let mut new_acc_triangle = triangle.0;
-
         for (vertex, acc) in triangle.0.iter().copied().zip(new_acc_triangle.iter_mut()) {
             // Find the first sibling who I either share a vertex with, or my vertex is on their
             // edge.
-            println!("----------------------------------------------------");
 
             for sibling in siblings.iter().copied() {
                 let (sibling_triangle, _, _, _, _) = chunks.get(sibling)?;
@@ -638,6 +622,86 @@ fn subdivide_smallest_chunks(
         });
 }
 
+fn subdivide_close_chunks(
+    mut commands: Commands,
+    camera: Single<&Transform, With<Player>>,
+    chunks: Query<(Entity, &Triangle, &SubdivisionLevel), Without<ChildrenChunks>>,
+) {
+    const MIN_RADIUS: f32 = 0.05;
+
+    chunks
+        .iter()
+        .filter(|(_, t, _)| t.corner_arc_radius() >= MIN_RADIUS)
+        .filter(|(_, t, l)| {
+            let distance = arc_distance(t.centre(), camera.translation.to_vec3a());
+            match l.0 {
+                // 90
+                0 => distance < FRAC_PI_2,
+                // 45
+                1 => distance < FRAC_PI_2 / 2.,
+                // 22.5
+                2 => distance < FRAC_PI_2 / 4.,
+                // 15
+                // 3 => distance < FRAC_PI_2 / 6.,
+                _ => false,
+            }
+        })
+        .for_each(|(e, _, _)| {
+            debug!("Subdividing chunk: {e:?}");
+            commands.trigger(SubdivideChunk(e));
+        });
+}
+
+/// Show higher LODs near, lower LODs far
+fn toggle_lods(
+    camera: Single<&Transform, With<Player>>,
+    chunks: Query<(Entity, &Triangle, &SubdivisionLevel, &mut Visibility)>,
+) {
+    for (entity, triangle, level, mut visible) in chunks {
+        // Nearest vertex
+        let distance = triangle
+            .0
+            .iter()
+            .map(|&v| arc_distance(v, camera.translation.to_vec3a()))
+            .min_by(f32::total_cmp)
+            .unwrap();
+
+        let show_ranges = [
+            // Level 0: 90+ degrees
+            FRAC_PI_2..f32::INFINITY,
+            // Level 1: 45-90 degrees
+            (FRAC_PI_2 / 2.)..FRAC_PI_2,
+            // Level 2: 22.5-45 degrees
+            (FRAC_PI_2 / 4.)..(FRAC_PI_2 / 2.),
+        ];
+
+        let should_show = show_ranges
+            .get(level.0)
+            .map(|r| r.contains(&distance))
+            // Anything closer shown by default
+            .unwrap_or_else(|| {
+                let range = show_ranges.last().unwrap();
+                distance < range.start
+            });
+
+        match (*visible, should_show) {
+            (Visibility::Hidden, true) => {
+                // Remove disabled
+                debug!("showing chunk {entity:?}");
+                *visible = Visibility::Visible;
+            }
+            (Visibility::Visible, false) => {
+                // Add disabled
+                debug!("hiding chunk {entity:?}");
+                *visible = Visibility::Hidden;
+            }
+            _ => {
+                // Already in correct state
+            }
+        }
+    }
+}
+
 fn draw_gizmos(mut gizmos: Gizmos, chunks: Query<(Entity, &AccTriangle)>) {
     const RED: Color = Color::srgb(1., 0., 0.);
     const GREEN: Color = Color::srgb(0., 1., 0.);
@@ -691,21 +755,58 @@ fn draw_gizmos(mut gizmos: Gizmos, chunks: Query<(Entity, &AccTriangle)>) {
     }
 }
 
+#[derive(Component)]
+struct Player;
+
+fn init_player(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    assets: Res<AssetHandles>,
+) {
+    let mesh = Sphere::new(0.1).mesh().uv(32, 18);
+    let mesh = meshes.add(mesh);
+    commands.spawn((
+        Player,
+        Transform::from_translation(Vec3::X * 2.),
+        Mesh3d(mesh),
+        MeshMaterial3d(assets.hue_material.clone()),
+    ));
+}
+
+fn move_player(mut player: Single<&mut Transform, With<Player>>, time: Res<Time>) {
+    let rot = Quat::from_rotation_z(PI * 0.1 * time.delta_secs());
+
+    player.rotate_around(Vec3::ZERO, rot);
+}
+
 pub struct ChunkPlugin;
 
 impl Plugin for ChunkPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, init_world)
             .add_observer(subdivide_chunk)
+            // Manual systems
             .add_systems(
                 Update,
                 (
                     // subdivide_random_chunks.run_if(input_just_pressed(KeyCode::Space)),
-                    subdivide_smallest_chunks.run_if(input_just_pressed(KeyCode::Space)),
+                    // subdivide_smallest_chunks.run_if(input_just_pressed(KeyCode::Space)),
+                    // subdivide_close_chunks.run_if(input_just_pressed(KeyCode::Space)),
                     adjust_mesh_height.run_if(input_just_pressed(KeyCode::KeyL)),
                 ),
             )
-            .add_systems(Update, draw_gizmos);
+            // Automagic LOD stuff
+            .add_systems(
+                Update,
+                (
+                    subdivide_close_chunks,
+                    (toggle_lods, adjust_mesh_height).chain(),
+                ),
+            )
+            .add_systems(Startup, init_player)
+            .add_systems(Update, move_player);
+
+        // .add_systems(Update, draw_gizmos);
     }
 }
 

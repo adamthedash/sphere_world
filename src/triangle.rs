@@ -1,4 +1,3 @@
-
 use glam::{Mat3A, Vec2, Vec3A};
 use itertools::Itertools;
 use num::rational::Ratio;
