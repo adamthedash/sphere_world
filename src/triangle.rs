@@ -1,234 +1,152 @@
-use glam::{Mat3A, Vec2, Vec3A};
+use std::f32::consts::TAU;
+
+use bevy::{
+    asset::RenderAssetUsages,
+    mesh::{Indices, PrimitiveTopology},
+    prelude::*,
+};
 use itertools::Itertools;
-use num::rational::Ratio;
+use num::{One, ToPrimitive, Zero};
 
-use crate::chunks::almost_equal;
+use crate::{bary::cartesian_to_barycentric, math::arc_distance};
 
 #[derive(Debug, Clone, Copy)]
-pub struct Barycentric {
-    /// Sum normalised to 1
-    /// Distances from edge opposite vertices [2, 0, 1]
-    pub distances: [f32; 3],
-    /// Signed vector length through origin
-    pub length: f32,
+pub enum TriangleCmp {
+    Outside,
+    /// Index of triangle vertex
+    Corner(usize),
+    Edge {
+        v0: usize,
+        v1: usize,
+        /// How far along V0-V1
+        t: f32,
+    },
+    Inside,
 }
 
-impl PartialEq for Barycentric {
-    fn eq(&self, other: &Self) -> bool {
-        self.distances
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Triangle {
+    pub vertices: [Vec3A; 3],
+    pub centre: Vec3A,
+    pub normal: Vec3A,
+    /// 0-1-2-0
+    pub edges: [(Vec3A, Vec3A); 3],
+    pub edge_midpoints: [Vec3A; 3],
+}
+
+impl Triangle {
+    pub fn new(vertices: [Vec3A; 3]) -> Self {
+        let centre = vertices.iter().sum::<Vec3A>() / 3.;
+
+        let edges = vertices
             .iter()
-            .zip(&other.distances)
-            .all(|(a, b)| almost_equal(*a, *b))
-            && almost_equal(self.length, other.length)
-    }
-}
+            .copied()
+            .circular_tuple_windows::<(_, _)>()
+            .collect_array::<3>()
+            .unwrap();
 
-impl Barycentric {
-    /// Snap to the vectex grid of the given size.
-    /// Out of bounds returns None
-    pub fn snap_even(self, num_subdivisions: u32) -> Option<BarycentricSnapped> {
-        if self.distances.iter().any(|d| d.is_nan() || d.is_infinite()) {
-            return None;
+        let normal = (edges[0].1 - edges[0].0)
+            .cross(edges[1].1 - edges[1].0)
+            .normalize();
+
+        let edge_midpoints = edges.map(|(v0, v1)| v0.midpoint(v1));
+
+        Self {
+            vertices,
+            centre,
+            normal,
+            edges,
+            edge_midpoints,
+        }
+    }
+
+    /// Distance between centre point and edge midpoint in radians
+    pub fn edge_arc_radius(&self) -> f32 {
+        let edge_midpoint = self.edge_midpoints[0];
+
+        arc_distance(self.centre, edge_midpoint)
+    }
+
+    pub fn cmp_bary(&self, point: Vec3A, subdivisions: u32) -> TriangleCmp {
+        let bary = cartesian_to_barycentric(self.vertices, point);
+        if bary.length < 0. {
+            // Other side of world
+            return TriangleCmp::Outside;
         }
 
-        let denom = 2_u32.pow(num_subdivisions);
-        let numerator = self.distances.map(|d| (d * denom as f32).round() as i32);
-        if !numerator.iter().all(|n| (0..=denom as i32).contains(n)) {
-            return None;
+        let Some(bary) = bary.snap_even(subdivisions) else {
+            return TriangleCmp::Outside;
+        };
+
+        if let Some(i) = bary.distances.iter().position(|d| d.is_one()) {
+            // Corner oposite this edge
+            return TriangleCmp::Corner((i + 2) % 3);
         }
-        let distances = numerator.map(|n| Ratio::new(n as u32, denom));
 
-        Some(BarycentricSnapped {
-            distances,
-            length: self.length,
-        })
-    }
-}
+        if let Some(i) = bary.distances.iter().position(|d| d.is_zero()) {
+            let i0 = i;
+            let i1 = (i + 1) % 3;
+            // Along this edge
+            let t = bary.distances[(i + 2) % 3];
+            return TriangleCmp::Edge {
+                v0: i0,
+                v1: i1,
+                t: t.to_f32().unwrap(),
+            };
+        }
 
-#[derive(Debug, Clone, Copy)]
-pub struct BarycentricSnapped {
-    /// Sum normalised to 1
-    /// Distances from edge opposite vertices [2, 0, 1]
-    pub distances: [Ratio<u32>; 3],
-    /// Signed vector length through origin
-    pub length: f32,
-}
-
-/// A 1d point along the edge of one pentagon
-/// Between 0 and 1
-#[derive(Debug)]
-struct EdgeLength {
-    /// The number of sections along
-    /// x <= l
-    x: u32,
-    /// The number of sections this edge is divided into
-    /// l >= 1
-    /// l is a power of 2
-    l: u32,
-}
-
-#[derive(Debug)]
-struct TriangularCoord {
-    /// Basis vectors formed by taking two edges along the face of a triangle
-    basis: Mat3A,
-    /// Lengths along the basis vectors
-    uv: [EdgeLength; 2],
-}
-
-fn cartesian_to_triangular(
-    triangle: [Vec3A; 3],
-    point: Vec3A,
-    num_segments: u32,
-) -> TriangularCoord {
-    let basis = Mat3A::from_cols(
-        triangle[1] - triangle[0],
-        triangle[2] - triangle[0],
-        triangle[0],
-    );
-    let projected = (basis.inverse() * point).truncate();
-
-    let Vec2 {
-        x: u_length,
-        y: v_length,
-    } = projected;
-
-    let u_length = EdgeLength {
-        x: (u_length * num_segments as f32).round() as u32,
-        l: num_segments,
-    };
-    let v_length = EdgeLength {
-        x: (v_length * num_segments as f32).round() as u32,
-        l: num_segments,
-    };
-
-    TriangularCoord {
-        basis,
-        uv: [u_length, v_length],
-    }
-}
-
-pub fn cartesian_to_barycentric(triangle: [Vec3A; 3], point: Vec3A) -> Barycentric {
-    let distances = triangle
-        .iter()
-        .circular_tuple_windows()
-        .map(|(v0, v1, v2)| {
-            let midpoint = v0.midpoint(*v1);
-            let height = v2 - midpoint;
-            let mid_p = point - midpoint;
-
-            // Project through point onto triangle face
-            let basis = Mat3A::from_cols(point.normalize(), height, (v1 - v0).normalize());
-            let projected = basis.inverse() * mid_p;
-
-            projected.y
-        })
-        .collect_array::<3>()
-        .unwrap();
-
-    let midpoint = triangle.iter().sum::<Vec3A>() / 3.;
-    let length = midpoint.normalize().dot(point) / midpoint.length();
-
-    Barycentric { distances, length }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{assert_matches, f32::consts::GOLDEN_RATIO};
-
-    use glam::{Mat3A, Vec3A};
-
-    use crate::triangle::{
-        Barycentric, EdgeLength, TriangularCoord, cartesian_to_barycentric, cartesian_to_triangular,
-    };
-
-    #[test]
-    fn test_triangular() {
-        let triangle = [
-            Vec3A::new(0., 1., GOLDEN_RATIO),
-            Vec3A::new(1., GOLDEN_RATIO, 0.),
-            Vec3A::new(GOLDEN_RATIO, 0., 1.),
-        ];
-
-        let num_segments = 2;
-
-        let point = triangle[0];
-        let triangular = cartesian_to_triangular(triangle, point, num_segments);
-        assert_matches!(
-            triangular,
-            TriangularCoord {
-                uv: [EdgeLength { x: 0, l: 2 }, EdgeLength { x: 0, l: 2 }],
-                ..
-            }
-        );
-
-        let point = triangle[1];
-        let triangular = cartesian_to_triangular(triangle, point, num_segments);
-        assert_matches!(
-            triangular,
-            TriangularCoord {
-                uv: [EdgeLength { x: 2, l: 2 }, EdgeLength { x: 0, l: 2 }],
-                ..
-            }
-        );
-
-        let point = triangle[2];
-        let triangular = cartesian_to_triangular(triangle, point, num_segments);
-        assert_matches!(
-            triangular,
-            TriangularCoord {
-                uv: [EdgeLength { x: 0, l: 2 }, EdgeLength { x: 2, l: 2 }],
-                ..
-            }
-        );
-
-        let point = Vec3A::X + Vec3A::Y + Vec3A::Z;
-        let triangular = cartesian_to_triangular(triangle, point, num_segments);
-        assert_matches!(
-            triangular,
-            TriangularCoord {
-                uv: [EdgeLength { x: 1, l: 2 }, EdgeLength { x: 1, l: 2 }],
-                ..
-            }
-        );
+        // Inside
+        TriangleCmp::Inside
     }
 
-    #[test]
-    fn test_barycentric() {
-        let triangle = [
-            Vec3A::new(0., 1., GOLDEN_RATIO),
-            Vec3A::new(1., GOLDEN_RATIO, 0.),
-            Vec3A::new(GOLDEN_RATIO, 0., 1.),
-        ];
+    pub fn subdivide(&self) -> [Self; 4] {
+        // Create midpoints of edges on unit sphere
+        let midpoints = self.edge_midpoints.map(Vec3A::normalize);
 
-        let point = triangle.iter().sum();
-        let bary = cartesian_to_barycentric(triangle, point);
-        assert_eq!(
-            bary,
-            Barycentric {
-                distances: [1. / 3., 1. / 3., 1. / 3.],
-                length: 3.
-            }
-        );
+        // Create outer triangles
+        let outer = midpoints
+            .iter()
+            .circular_tuple_windows()
+            .zip(self.vertices.iter().cycle().skip(1))
+            // CCW order
+            .map(|((v0, v1), v2)| [*v2, *v1, *v0]);
 
-        let point = (triangle[0] + triangle[1]) * 1.;
-        let bary = cartesian_to_barycentric(triangle, point);
-        assert_eq!(
-            bary,
-            Barycentric {
-                distances: [0., 1. / 2., 1. / 2.],
-                length: 2.
-            }
-        );
+        // Inner triangle is just between the new midpoints
+        let inner = std::iter::once(midpoints);
 
-        let bary2 = bary.snap_even(0);
-        println!("{:?}", bary2);
-        let bary2 = bary.snap_even(1);
-        println!("{:?}", bary2);
-        let bary2 = bary.snap_even(2);
-        println!("{:?}", bary2);
+        // Wrap in triangle
+        outer
+            .chain(inner)
+            .map(Triangle::new)
+            .collect_array()
+            .unwrap()
+    }
 
-        let basis = Mat3A::from_cols(triangle[0], triangle[1], triangle[2]);
-        let projected = basis.inverse() * -point;
-        println!("proj: {:?}", projected);
+    // Gets a basic mesh of a single triangle for this chunk
+    pub fn get_mesh(&self) -> Mesh {
+        let indices = Indices::U32(vec![0, 1, 2]);
+        let positions = self
+            .vertices
+            .iter()
+            .map(|t| t.to_array())
+            .collect::<Vec<_>>();
+
+        // Set UV to point at the orientation of the triangle
+        let uvs = (0..3)
+            .map(|i| {
+                let angle = TAU * i as f32 / 3.;
+                let (y, x) = angle.sin_cos();
+                [y, x].map(|x| x / 2. + 0.5)
+            })
+            .collect::<Vec<_>>();
+
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        )
+        .with_inserted_indices(indices)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
+        .with_computed_normals()
     }
 }

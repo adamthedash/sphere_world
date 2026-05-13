@@ -1,91 +1,22 @@
 use std::{
     collections::VecDeque,
-    f32::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, FRAC_PI_6, FRAC_PI_8, PI, TAU},
+    f32::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, FRAC_PI_6, FRAC_PI_8, PI},
 };
 
 use bevy::{
-    asset::RenderAssetUsages,
-    input::common_conditions::input_just_pressed,
-    mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
-    platform::collections::HashSet,
-    prelude::*,
+    input::common_conditions::input_just_pressed, mesh::VertexAttributeValues,
+    platform::collections::HashSet, prelude::*,
 };
 use glam::{Vec2, Vec3A};
 use hexasphere::shapes::IcoSphere;
 use itertools::Itertools;
-use num::{One, ToPrimitive, Zero};
 use rand::seq::IteratorRandom;
 
-use crate::{assets::AssetHandles, triangle::cartesian_to_barycentric};
-
-// ========================================================
-// Trig & maths
-// ========================================================
-
-/// Area of a triangle given the 3 points
-fn area2(triangle: [Vec3A; 3]) -> f32 {
-    assert!((1. - triangle[0].length()).abs() < EPS);
-    assert!((1. - triangle[1].length()).abs() < EPS);
-    assert!((1. - triangle[2].length()).abs() < EPS);
-
-    let base_mid = triangle[0].midpoint(triangle[1]);
-    let height2 = (triangle[2] - base_mid).length_squared();
-    let width2 = (triangle[1] - triangle[0]).length_squared();
-
-    0.25 * height2 * width2
-}
-
-const EPS: f32 = 1e-3;
-
-/// https://en.wikipedia.org/wiki/Triple_product#Properties
-fn coplanar(v0: Vec3A, v1: Vec3A, point: Vec3A) -> bool {
-    v0.cross(v1).dot(point).abs() < EPS
-}
-
-fn colinear(v: Vec3A, point: Vec3A) -> bool {
-    (v.dot(point) - v.length() * point.length()).abs() < EPS
-}
-
-fn obtuse(v: Vec3A, point: Vec3A) -> bool {
-    v.dot(point) < 0.
-}
-
-/// Project point towards the origin onto the line formed by v0-v1.
-/// v0, v1, point must be coplanar
-fn project(v0: Vec3A, v1: Vec3A, point: Vec3A) -> Vec3A {
-    let d = v1 - v0; // direction of the line
-
-    // Solve: s * P = v0 + t*d  =>  s * P - t*d = v0
-    // Use cross products to isolate t:
-    let p_cross_d = point.cross(d);
-    let denom = p_cross_d.dot(p_cross_d); // |P × d|²
-
-    let v0_cross_d = v0.cross(d);
-    let s = v0_cross_d.dot(p_cross_d) / denom;
-
-    s * point
-}
-
-/// Cosine similarity: (a . b) / |a||b|
-fn cossim(v0: Vec3A, v1: Vec3A) -> f32 {
-    v0.dot(v1) / (v0.length_squared() * v1.length_squared()).sqrt()
-}
-
-/// Absolute angle between two vectors
-fn arc_distance(v0: Vec3A, v1: Vec3A) -> f32 {
-    cossim(v0, v1).acos()
-}
-
-/// https://en.wikipedia.org/wiki/Heron%27s_formula
-fn heron_area(a: f32, b: f32, c: f32) -> f32 {
-    let s = (a + b + c) / 2.;
-
-    (s * (s - a) * (s - b) * (s - c)).sqrt()
-}
-
-pub fn almost_equal(a: f32, b: f32) -> bool {
-    (a - b).abs() < EPS
-}
+use crate::{
+    assets::AssetHandles,
+    math::arc_distance,
+    triangle::{Triangle, TriangleCmp},
+};
 
 // ========================================================
 // ECS bits
@@ -118,149 +49,13 @@ impl WorldRoot {
 #[derive(Component)]
 pub struct ChunkPos(pub Vec3A);
 
-#[derive(Debug, Clone, Copy)]
-enum TriangleCmp {
-    Outside,
-    /// Index of triangle vertex
-    Corner(usize),
-    Edge {
-        v0: usize,
-        v1: usize,
-        /// How far along V0-V1
-        t: f32,
-    },
-    Inside,
-}
-
-#[derive(Component, Debug, Clone, Copy)]
-pub struct Triangle(pub [Vec3A; 3]);
-
-impl Triangle {
-    fn area(&self) -> f32 {
-        area2(self.0).sqrt()
-    }
-
-    fn edges(&self) -> [(Vec3A, Vec3A); 3] {
-        self.0
-            .iter()
-            .circular_tuple_windows::<(_, _)>()
-            .map(|(v0, v1)| (*v0, *v1))
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap()
-    }
-
-    /// Centre point on unit circle
-    pub fn centre(&self) -> Vec3A {
-        (self.0.iter().sum::<Vec3A>() / 3.).normalize()
-    }
-
-    fn normal(&self) -> Vec3A {
-        (self.0[1] - self.0[0])
-            .cross(self.0[2] - self.0[1])
-            .normalize()
-    }
-
-    /// Distance between centre point and edge midpoint in radians
-    fn edge_arc_radius(&self) -> f32 {
-        let edge_midpoint = self.0[0].midpoint(self.0[1]);
-
-        arc_distance(self.centre(), edge_midpoint)
-    }
-
-    fn corner_arc_radius(&self) -> f32 {
-        arc_distance(self.centre(), self.0[0])
-    }
-
-    fn cmp_bary(&self, point: Vec3A, subdivisions: u32) -> TriangleCmp {
-        let bary = cartesian_to_barycentric(self.0, point);
-        if bary.length < 0. {
-            // Other side of world
-            return TriangleCmp::Outside;
-        }
-
-        let Some(bary) = bary.snap_even(subdivisions) else {
-            return TriangleCmp::Outside;
-        };
-
-        if let Some(i) = bary.distances.iter().position(|d| d.is_one()) {
-            // Corner oposite this edge
-            return TriangleCmp::Corner((i + 2) % 3);
-        }
-
-        if let Some(i) = bary.distances.iter().position(|d| d.is_zero()) {
-            let i0 = i;
-            let i1 = (i + 1) % 3;
-            // Along this edge
-            // TODO: check this index
-            let t = bary.distances[(i + 2) % 3];
-            return TriangleCmp::Edge {
-                v0: i0,
-                v1: i1,
-                t: t.to_f32().unwrap(),
-            };
-        }
-
-        // Inside
-        TriangleCmp::Inside
-    }
-
-    fn subdivide(&self) -> [Self; 4] {
-        // Create midpoints of edges on unit sphere
-        let midpoints = self.edges().map(|(v0, v1)| v0.midpoint(v1).normalize());
-
-        // Create outer triangles
-        let outer = midpoints
-            .iter()
-            .circular_tuple_windows()
-            .zip(self.0.iter().cycle().skip(1))
-            // CCW order
-            .map(|((v0, v1), v2)| [*v2, *v1, *v0]);
-
-        // Inner triangle is just between the new midpoints
-        let inner = std::iter::once(midpoints);
-
-        // Wrap in triangle
-        outer
-            .chain(inner)
-            .map(Triangle)
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap()
-    }
-
-    // Gets a basic mesh of a single triangle for this chunk
-    pub fn get_mesh(&self) -> Mesh {
-        let indices = Indices::U32(vec![0, 1, 2]);
-        let positions = self.0.iter().map(|t| t.to_array()).collect::<Vec<_>>();
-
-        // Set UV to point at the orientation of the triangle
-        let uvs = (0..3)
-            .map(|i| {
-                let angle = TAU * i as f32 / 3.;
-                let (y, x) = angle.sin_cos();
-                [y, x].map(|x| x / 2. + 0.5)
-            })
-            .collect::<Vec<_>>();
-
-        Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::default(),
-        )
-        .with_inserted_indices(indices)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-        .with_computed_normals()
-    }
-}
-
 #[derive(Component, Debug)]
 pub struct AccTriangle(pub [Vec3A; 3]);
 
 impl AccTriangle {
     /// Conversion for all of the methods
     pub fn as_triangle(&self) -> Triangle {
-        Triangle(self.0)
+        Triangle::new(self.0)
     }
 }
 
@@ -306,12 +101,12 @@ pub fn subdivide_chunk(
     let new_bundles = new_triangles.map(|t| {
         let mesh = meshes.add(t.get_mesh());
         ChunkBundle {
-            pos: ChunkPos(t.centre()),
+            pos: ChunkPos(t.centre.normalize()),
             triangle: t,
             mesh: Mesh3d(mesh),
             transform: Transform::IDENTITY,
             material: material.clone(),
-            acc_triangle: AccTriangle(t.0),
+            acc_triangle: AccTriangle(t.vertices),
             subdivision: SubdivisionLevel(level.0 + 1),
         }
     });
@@ -330,7 +125,7 @@ pub fn subdivide_chunk(
     children.iter().zip(new_triangles).for_each(|(e, t)| {
         commands.spawn((
             Text2d::new(format!("{:?}", e)),
-            Transform::from_translation((t.centre()).to_array().into()),
+            Transform::from_translation(t.centre.normalize().to_array().into()),
             TextColor::WHITE,
         ));
     });
@@ -353,7 +148,7 @@ fn init_world(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, assets: 
         .get_all_indices()
         .into_iter()
         .array_chunks::<3>()
-        .map(|indices| Triangle(indices.map(|i| vertices[i as usize])));
+        .map(|indices| Triangle::new(indices.map(|i| vertices[i as usize])));
 
     // Get adjacency LUT
     let indices = sphere
@@ -385,7 +180,7 @@ fn init_world(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, assets: 
             let mesh = triangle.get_mesh();
             let mesh = meshes.add(mesh);
 
-            let pos = triangle.centre();
+            let pos = triangle.centre.normalize();
 
             commands
                 .spawn((
@@ -395,7 +190,7 @@ fn init_world(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, assets: 
                         mesh: Mesh3d(mesh),
                         transform: Transform::IDENTITY,
                         material: MeshMaterial3d(assets.hue_material.clone()),
-                        acc_triangle: AccTriangle(triangle.0),
+                        acc_triangle: AccTriangle(triangle.vertices),
                         subdivision: SubdivisionLevel(0),
                     },
                     Visibility::Hidden,
@@ -423,6 +218,8 @@ fn iter_adjacent(
         &Visibility,
     )>,
 ) -> Vec<Entity> {
+    let span = info_span!("iter_adjacent").entered();
+
     let mut queue = VecDeque::from(world.root_chunks);
 
     let (test_triangle, test_level, _, _) = relationships.get(entity).unwrap();
@@ -432,7 +229,7 @@ fn iter_adjacent(
         let (triangle, level, children, visible) = relationships.get(candidate).unwrap();
 
         let cmp = test_triangle
-            .0
+            .vertices
             .map(|v| triangle.cmp_bary(v, test_level.0.max(level.0) as u32));
 
         let mut cmp_counts = [0_usize; 4];
@@ -496,6 +293,8 @@ fn iter_adjacent(
         }
     }
 
+    drop(span);
+
     chunks
 }
 
@@ -531,19 +330,26 @@ fn adjust_mesh_height(
     while let Some(entity) = queue.pop_front() {
         let (triangle, level, children, _, visible) = chunks.get(entity)?;
 
-        if matches!(visible, Visibility::Hidden)
-            && let Some(children) = children
-        {
+        if matches!(visible, Visibility::Hidden) {
             // This one is disabled, so it doesn't need adjusting. Adjust children instead
-            queue.extend(children.0.iter().copied());
+            if let Some(children) = children {
+                queue.extend(children.0.iter().copied());
+            }
+
             continue;
         }
 
         // Get list of active adjacent chunks
         let siblings = iter_adjacent(entity, &world, relationships);
+        let span = info_span!("adjust_mesh_rest").entered();
 
-        let mut new_acc_triangle = triangle.0;
-        for (vertex, acc) in triangle.0.iter().copied().zip(new_acc_triangle.iter_mut()) {
+        let mut new_acc_triangle = triangle.vertices;
+        for (vertex, acc) in triangle
+            .vertices
+            .iter()
+            .copied()
+            .zip(new_acc_triangle.iter_mut())
+        {
             // Find the first sibling who I either share a vertex with, or my vertex is on their
             // edge.
 
@@ -554,11 +360,12 @@ fn adjust_mesh_height(
                 let cmp = sibling_triangle.cmp_bary(vertex, level.0 as u32);
                 match cmp {
                     TriangleCmp::Corner(i) => {
-                        *acc = sibling_acc_triangle.0[i];
+                        *acc = sibling_acc_triangle.vertices[i];
                         break;
                     }
                     TriangleCmp::Edge { v0, v1, t } => {
-                        *acc = sibling_acc_triangle.0[v0].lerp(sibling_acc_triangle.0[v1], t);
+                        *acc = sibling_acc_triangle.vertices[v0]
+                            .lerp(sibling_acc_triangle.vertices[v1], t);
                         break;
                     }
                     TriangleCmp::Outside | TriangleCmp::Inside => {}
@@ -583,6 +390,7 @@ fn adjust_mesh_height(
         // Update acc triangle
         let mut acc_triangle = acc_triangles.get_mut(entity)?;
         acc_triangle.0 = new_acc_triangle;
+        drop(span);
     }
 
     Ok(())
@@ -590,32 +398,31 @@ fn adjust_mesh_height(
 
 fn subdivide_random_chunks(
     mut commands: Commands,
-    chunks: Query<(Entity, &Triangle), Without<ChildrenChunks>>,
+    chunks: Query<(Entity, &SubdivisionLevel), Without<ChildrenChunks>>,
 ) {
     const MAX_CHUNKS: usize = 1;
-    const MIN_RADIUS: f32 = 0.05;
 
     let mut rng = rand::rng();
-    let indices = chunks
+    chunks
         .iter()
-        .filter(|(_, t)| t.corner_arc_radius() >= MIN_RADIUS)
-        .sample(&mut rng, MAX_CHUNKS);
-    indices.into_iter().for_each(|(e, _)| {
-        commands.trigger(SubdivideChunk(e));
-    });
+        .filter(|(_, l)| l.0 < MAX_LOD_LEVEL)
+        .sample(&mut rng, MAX_CHUNKS)
+        .into_iter()
+        .for_each(|(e, _)| {
+            commands.trigger(SubdivideChunk(e));
+        });
 }
 
 fn subdivide_smallest_chunks(
     mut commands: Commands,
-    chunks: Query<(Entity, &Triangle), Without<ChildrenChunks>>,
+    chunks: Query<(Entity, &SubdivisionLevel), Without<ChildrenChunks>>,
 ) {
     const MAX_CHUNKS: usize = 1;
-    const MIN_RADIUS: f32 = 0.05;
 
     chunks
         .iter()
-        .filter(|(_, t)| t.corner_arc_radius() >= MIN_RADIUS)
-        .sorted_by(|(_, t0), (_, t1)| t0.corner_arc_radius().total_cmp(&t1.corner_arc_radius()))
+        .filter(|(_, l)| l.0 < MAX_LOD_LEVEL)
+        .sorted_by_key(|(_, l)| -(l.0 as i32))
         .take(MAX_CHUNKS)
         .for_each(|(e, _)| {
             commands.trigger(SubdivideChunk(e));
@@ -643,11 +450,12 @@ fn subdivide_close_chunks(
         .filter(|(_, _, l)| l.0 < MAX_LOD_LEVEL)
         .filter(|(_, t, l)| {
             // Nearest vertex
-            let distance =
-                t.0.iter()
-                    .map(|&v| arc_distance(v, camera.translation.to_vec3a()))
-                    .min_by(f32::total_cmp)
-                    .unwrap();
+            let distance = t
+                .vertices
+                .iter()
+                .map(|&v| arc_distance(v, camera.translation.to_vec3a()))
+                .min_by(f32::total_cmp)
+                .unwrap();
 
             let border = *LOD_BORDERS.get(l.0).unwrap_or(&0.);
 
@@ -673,7 +481,7 @@ fn toggle_lods(
 
         // Nearest vertex
         let distance = triangle
-            .0
+            .vertices
             .iter()
             .map(|&v| arc_distance(v, camera.translation.to_vec3a()))
             .min_by(f32::total_cmp)
@@ -737,18 +545,17 @@ fn draw_gizmos(mut gizmos: Gizmos, chunks: Query<(Entity, &AccTriangle)>) {
     // Triangle faces
     for (entity, triangle) in chunks {
         let triangle = triangle.as_triangle();
-        let centre = triangle.0.iter().sum::<Vec3A>() / 3.;
-        let translation = centre + triangle.normal() * 0.01;
+        let translation = triangle.centre + triangle.normal * 0.01;
 
         // Local transform matrix
-        let forward = triangle.normal().normalize().to_vec3();
+        let forward = triangle.normal.to_vec3();
         let right = Vec3::Y.cross(forward).normalize();
         let up = forward.cross(right).normalize();
         let mat = Mat3::from_cols(right, up, forward);
         let rotation = Quat::from_mat3(&mat);
 
         // Local axes
-        let scale = triangle.corner_arc_radius();
+        let scale = triangle.edge_arc_radius();
         let t = translation.to_vec3();
         gizmos.line(t, t + forward * scale * 0.2, GREEN);
         gizmos.line(t, t + right * scale * 0.2, RED);
@@ -825,11 +632,10 @@ mod tests {
 
     use glam::Vec3A;
 
-    use crate::chunks::{EPS, Triangle, TriangleCmp, arc_distance};
-
-    fn almost_equal(a: f32, b: f32) -> bool {
-        (a - b).abs() < EPS
-    }
+    use crate::{
+        chunks::{Triangle, TriangleCmp, arc_distance},
+        math::almost_equal,
+    };
 
     #[test]
     fn test_arc_dist() {
@@ -865,18 +671,19 @@ mod tests {
     #[test]
     fn test_cmp_edge_cases() {
         // case failed due to precision loss during projection to triangle axes
-        let triangle0 = Triangle([
+        let triangle0 = Triangle::new([
             Vec3A::new(0.32211334, 0.39611205, 0.85984784), // shared
             Vec3A::new(0.38071868, 0.41345215, 0.82710975),
             Vec3A::new(0.3353182, 0.46525362, 0.81920743), // shared
         ]);
-        let triangle1 = Triangle([
+        let triangle1 = Triangle::new([
             Vec3A::new(0.2763932, 0.4472136, 0.8506508),
             Vec3A::new(0.32211334, 0.39611205, 0.85984784), // shared
             Vec3A::new(0.3353182, 0.46525362, 0.81920743),  // shared
         ]);
-        let t0_t1 = triangle0.0.map(|v| triangle1.cmp_bary(v, 4));
-        let t1_t0 = triangle1.0.map(|v| triangle0.cmp_bary(v, 4));
+
+        let t0_t1 = triangle0.vertices.map(|v| triangle1.cmp_bary(v, 4));
+        let t1_t0 = triangle1.vertices.map(|v| triangle0.cmp_bary(v, 4));
         assert_matches!(
             t0_t1,
             [
@@ -895,18 +702,18 @@ mod tests {
         );
 
         // Case failes as triangles share a vertex after being reflexed through origin
-        let triangle0 = Triangle([
+        let triangle0 = Triangle::new([
             Vec3A::new(0.28, 0.45, 0.85),
             Vec3A::new(0.59, 0.00, 0.81),
             Vec3A::new(0.69, 0.53, 0.50),
         ]);
-        let triangle1 = Triangle([
+        let triangle1 = Triangle::new([
             Vec3A::new(-0.72, 0.45, -0.53),
             Vec3A::new(-0.28, -0.45, -0.85),
             Vec3A::new(-0.89, -0.45, 0.00),
         ]);
-        let t0_t1 = triangle0.0.map(|v| triangle1.cmp_bary(v, 4));
-        let t1_t0 = triangle1.0.map(|v| triangle0.cmp_bary(v, 4));
+        let t0_t1 = triangle0.vertices.map(|v| triangle1.cmp_bary(v, 4));
+        let t1_t0 = triangle1.vertices.map(|v| triangle0.cmp_bary(v, 4));
         assert_matches!(
             t0_t1,
             [
@@ -926,19 +733,19 @@ mod tests {
         println!("=======================================");
 
         // Fails as point is NaN when transformed to bary coords
-        let triangle0 = Triangle([
+        let triangle0 = Triangle::new([
             Vec3A::new(0.7236068, -0.4472136, 0.5257311),
             Vec3A::new(0.9510565, 0.0, 0.30901697), // failing
             Vec3A::new(0.58778524, 0.0, 0.809017),
         ]);
-        let triangle1 = Triangle([
+        let triangle1 = Triangle::new([
             Vec3A::new(0.2763932, 0.4472136, -0.8506508),
             Vec3A::new(0.7236068, -0.4472136, -0.5257311),
             Vec3A::new(-0.2763932, -0.4472136, -0.8506508),
         ]);
 
-        let t0_t1 = triangle0.0.map(|v| triangle1.cmp_bary(v, 4));
-        let t1_t0 = triangle1.0.map(|v| triangle0.cmp_bary(v, 4));
+        let t0_t1 = triangle0.vertices.map(|v| triangle1.cmp_bary(v, 4));
+        let t1_t0 = triangle1.vertices.map(|v| triangle0.cmp_bary(v, 4));
         assert_matches!(
             t0_t1,
             [
