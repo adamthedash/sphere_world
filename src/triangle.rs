@@ -11,7 +11,7 @@ use num::{One, ToPrimitive, Zero};
 use crate::{bary::cartesian_to_barycentric, math::arc_distance};
 
 #[derive(Debug, Clone, Copy)]
-pub enum TriangleCmp {
+pub enum TrianglePointCmp {
     Outside,
     /// Index of triangle vertex
     Corner(usize),
@@ -22,6 +22,15 @@ pub enum TriangleCmp {
         t: f32,
     },
     Inside,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum TriangleTriangleCmp {
+    Same,
+    Unrelated,
+    Sibling,
+    Unc,
+    Ancestor,
 }
 
 #[derive(Component, Debug, Clone, Copy)]
@@ -67,20 +76,20 @@ impl Triangle {
         arc_distance(self.centre, edge_midpoint)
     }
 
-    pub fn cmp_bary(&self, point: Vec3A, subdivisions: u32) -> TriangleCmp {
+    pub fn cmp_point(&self, point: Vec3A, subdivisions: u32) -> TrianglePointCmp {
         let bary = cartesian_to_barycentric(self.vertices, point);
         if bary.length < 0. {
             // Other side of world
-            return TriangleCmp::Outside;
+            return TrianglePointCmp::Outside;
         }
 
         let Some(bary) = bary.snap_even(subdivisions) else {
-            return TriangleCmp::Outside;
+            return TrianglePointCmp::Outside;
         };
 
         if let Some(i) = bary.distances.iter().position(|d| d.is_one()) {
             // Corner oposite this edge
-            return TriangleCmp::Corner((i + 2) % 3);
+            return TrianglePointCmp::Corner((i + 2) % 3);
         }
 
         if let Some(i) = bary.distances.iter().position(|d| d.is_zero()) {
@@ -88,7 +97,7 @@ impl Triangle {
             let i1 = (i + 1) % 3;
             // Along this edge
             let t = bary.distances[(i + 2) % 3];
-            return TriangleCmp::Edge {
+            return TrianglePointCmp::Edge {
                 v0: i0,
                 v1: i1,
                 t: t.to_f32().unwrap(),
@@ -96,7 +105,59 @@ impl Triangle {
         }
 
         // Inside
-        TriangleCmp::Inside
+        TrianglePointCmp::Inside
+    }
+
+    pub fn cmp_triangle(&self, other: &Self, subdivisions: u32) -> TriangleTriangleCmp {
+        let cmp = self.vertices.map(|v| other.cmp_point(v, subdivisions));
+
+        let mut cmp_counts = [0_usize; 4];
+        for c in cmp {
+            let i = match c {
+                TrianglePointCmp::Outside => 0,
+                TrianglePointCmp::Corner(_) => 1,
+                TrianglePointCmp::Edge { .. } => 2,
+                TrianglePointCmp::Inside => 3,
+            };
+            cmp_counts[i] += 1;
+        }
+
+        match cmp_counts {
+            // [O C E I]
+            // Ancestor fully inside, inside touching edge
+            [_, _, _, 1..] |
+            // Parent centre
+            [_, _, 3.., _] |
+            // Ancestor corner
+            [_, 1, 2, _] => {
+                TriangleTriangleCmp::Ancestor
+            }
+
+            // (gr)unc corner-edge
+            [1, 1, 1, _] |
+            // (gr)unc edge-edge
+            [1, _, 2, _] |
+            // Corner on edge but not adjacent
+            [2, _, 1, _] => {
+                TriangleTriangleCmp::Unc
+            }
+
+            // Direct sibling
+            [1, 2, _, _] => {
+                TriangleTriangleCmp::Sibling
+            }
+            // Self
+            [_, 3.., _, _] => {
+                TriangleTriangleCmp::Same
+            }
+            // Fully outside
+            [3.., _, _, _] |
+            // Shared corner but not adjacent
+            [2, 1, _, _] => {
+                TriangleTriangleCmp::Unrelated
+            }
+            x => unreachable!("Invalid combination: {:?}", x),
+        }
     }
 
     pub fn subdivide(&self) -> [Self; 4] {

@@ -15,7 +15,7 @@ use rand::seq::IteratorRandom;
 use crate::{
     assets::AssetHandles,
     math::arc_distance,
-    triangle::{Triangle, TriangleCmp},
+    triangle::{Triangle, TrianglePointCmp, TriangleTriangleCmp},
 };
 
 // ========================================================
@@ -82,6 +82,107 @@ pub struct ParentChunk(Entity);
 #[relationship_target(relationship = ParentChunk)]
 pub struct ChildrenChunks(Vec<Entity>);
 
+/// The entity that has this component is adjacent to the entities within. This entity is at an
+/// equal or higher LOD than the others.
+#[derive(Component)]
+pub struct AdjacentUp(Vec<Entity>);
+
+/// The entity that has this component is adjacent to the entities within. This entity is at an
+/// equal or lower LOD than the others.
+#[derive(Component)]
+pub struct AdjacentDown(Vec<Entity>);
+
+#[derive(EntityEvent)]
+pub struct CalcAdjacent {
+    entity: Entity,
+    is_recalc: bool,
+}
+
+fn calc_adjacent_chunks(
+    event: On<CalcAdjacent>,
+    mut commands: Commands,
+    world: Res<WorldRoot>,
+    relationships: Query<(
+        &Triangle,
+        &SubdivisionLevel,
+        Option<&ChildrenChunks>,
+        Option<&ParentChunk>,
+    )>,
+    mut adj_downs: Query<&mut AdjacentDown>,
+) {
+    let span = info_span!("calc_adjacent_chunks").entered();
+    let mut queue = VecDeque::from(world.root_chunks);
+
+    let (test_triangle, test_level, _, parent) = relationships.get(event.entity).unwrap();
+
+    let mut adjacent_chunks = vec![];
+    while let Some(candidate) = queue.pop_front() {
+        let (triangle, level, children, _) = relationships.get(candidate).unwrap();
+
+        let cmp = test_triangle.cmp_triangle(triangle, test_level.0.max(level.0) as u32);
+
+        match cmp {
+            TriangleTriangleCmp::Ancestor => {
+                debug!("{:?} --[ancestor of]-> {:?}", candidate, event.entity);
+
+                let children = children.expect("Ancestor chunks must have children");
+                queue.extend(children.0.iter().copied());
+            }
+            TriangleTriangleCmp::Unc => {
+                adjacent_chunks.push(candidate);
+                if let Some(children) = children {
+                    queue.extend(children.0.iter().copied());
+                }
+            }
+            TriangleTriangleCmp::Same
+            | TriangleTriangleCmp::Unrelated
+            | TriangleTriangleCmp::Sibling => {}
+        }
+    }
+
+    debug!("adjacent: {:?} -> {:?}", event.entity, adjacent_chunks);
+
+    // Add to self
+    commands
+        .entity(event.entity)
+        .insert(AdjacentUp(adjacent_chunks.clone()));
+
+    // Add to adjacent
+    for e in adjacent_chunks {
+        if let Ok(mut adj_down) = adj_downs.get_mut(e) {
+            // Add to existing list
+            if !adj_down.0.contains(&event.entity) {
+                adj_down.0.push(event.entity);
+            }
+        } else {
+            // Add new component
+            commands.entity(e).insert(AdjacentDown(vec![event.entity]));
+        }
+    }
+
+    if !event.is_recalc {
+        // NOTE: Edge case:
+        //  1) N exists on left, N+1 exists on right
+        //  2) N+2 on right is created
+        //  3) N+1 on left is created
+        //  -> N+2 on right needs to have N+1 inserted or all recalculated
+        //  All chunks who were previously adjacent to N+1 on right need their adj recalculated
+        let parent = parent.expect("This chunk came from a subdivision, so should have a parent");
+        if let Ok(parent_adj_down) = adj_downs.get(parent.0) {
+            for &e in &parent_adj_down.0 {
+                debug!("Recalculating adjacent for {e:?}");
+                commands.trigger(CalcAdjacent {
+                    entity: e,
+                    // Prevents infinite loops
+                    is_recalc: true,
+                });
+            }
+        }
+    }
+
+    drop(span)
+}
+
 #[derive(EntityEvent)]
 pub struct SubdivideChunk(Entity);
 
@@ -121,19 +222,18 @@ pub fn subdivide_chunk(
 
     debug!("Subdivided chunk {:?} -> {:?}", event.0, children);
 
-    // Add debug text
-    children.iter().zip(new_triangles).for_each(|(e, t)| {
-        commands.spawn((
-            Text2d::new(format!("{:?}", e)),
-            Transform::from_translation(t.centre.normalize().to_array().into()),
-            TextColor::WHITE,
-        ));
-    });
-
     // Add children to this chunk
     commands
         .entity(event.0)
         .add_related::<ParentChunk>(&children);
+
+    // Trigger adjacency updates for new chunks
+    children.iter().for_each(|&e| {
+        commands.trigger(CalcAdjacent {
+            entity: e,
+            is_recalc: false,
+        })
+    });
 
     Ok(())
 }
@@ -210,92 +310,27 @@ fn init_world(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, assets: 
 /// Sorted from low to high resolution
 fn iter_adjacent(
     entity: Entity,
-    world: &WorldRoot,
-    relationships: Query<(
-        &Triangle,
-        &SubdivisionLevel,
-        Option<&ChildrenChunks>,
-        &Visibility,
-    )>,
+    visibility: Query<&Visibility>,
+    adj_ups: Query<&AdjacentUp>,
 ) -> Vec<Entity> {
     let span = info_span!("iter_adjacent").entered();
 
-    let mut queue = VecDeque::from(world.root_chunks);
+    let adjacent = adj_ups.get(entity).expect("No adj");
 
-    let (test_triangle, test_level, _, _) = relationships.get(entity).unwrap();
+    let enabled = adjacent
+        .0
+        .iter()
+        .filter(|candidate| {
+            let visible = visibility.get(**candidate).unwrap();
 
-    let mut chunks = vec![];
-    while let Some(candidate) = queue.pop_front() {
-        let (triangle, level, children, visible) = relationships.get(candidate).unwrap();
-
-        let cmp = test_triangle
-            .vertices
-            .map(|v| triangle.cmp_bary(v, test_level.0.max(level.0) as u32));
-
-        let mut cmp_counts = [0_usize; 4];
-        for c in cmp {
-            let i = match c {
-                TriangleCmp::Outside => 0,
-                TriangleCmp::Corner(_) => 1,
-                TriangleCmp::Edge { .. } => 2,
-                TriangleCmp::Inside => 3,
-            };
-            cmp_counts[i] += 1;
-        }
-
-        match cmp_counts {
-            // [O C E I]
-            // Ancestor fully inside, inside touching edge
-            [_, _, _, 1..] |
-            // Parent centre
-            [_, _, 3.., _] |
-            // Ancestor corner
-            [_, 1, 2, _] => {
-                let cmp_pretty = "OCEI".chars().zip(cmp_counts)
-                    .filter(|(_, n)| *n > 0)
-                    .map(|(c, n)| format!("{c}{n} "))
-                    .collect::<String>();
-                debug!("{:?} --[ancestor of]-> {:?} {}", candidate, entity, cmp_pretty);
-
-                let children = children.expect("Ancestor chunks must have children");
-                queue.extend(children.0.iter().copied());
-            }
-
-            // Direct sibling
-            [1, 2, _, _] => {}
-            // (gr)unc corner-edge
-            [1, 1, 1, _] |
-            // (gr)unc edge-edge
-            [1, _, 2, _] |
-            // Corner on edge but not adjacent
-            [2, _, 1, _] => {
-                if matches!(visible, Visibility::Hidden) {
-                    if let Some(children) = children {
-                        queue.extend(children.0.iter().copied());
-                    }
-                } else {
-                    // Adjacent enabled Leaf chunk
-                    chunks.push(candidate);
-                }
-            }
-
-
-            [_, 3.., _, _] => {
-                // Self
-            }
-            [3.., _, _, _] => {
-                // Fully outside
-            }
-            [2, 1, _, _] => {
-                // Shared corner but not adjacent
-            }
-            x => unreachable!("Invalid combination: {:?}", x),
-        }
-    }
+            matches!(visible, Visibility::Visible)
+        })
+        .copied()
+        .collect::<Vec<_>>();
 
     drop(span);
 
-    chunks
+    enabled
 }
 
 fn adjust_mesh_height(
@@ -310,12 +345,8 @@ fn adjust_mesh_height(
         Option<&ParentChunk>,
         &Visibility,
     )>,
-    relationships: Query<(
-        &Triangle,
-        &SubdivisionLevel,
-        Option<&ChildrenChunks>,
-        &Visibility,
-    )>,
+    visibility: Query<&Visibility>,
+    adj_ups: Query<&AdjacentUp>,
 ) -> Result {
     let mut queue = VecDeque::new();
     // Add all base+1 chunks to the queue, base chunks don't need processing
@@ -340,7 +371,7 @@ fn adjust_mesh_height(
         }
 
         // Get list of active adjacent chunks
-        let siblings = iter_adjacent(entity, &world, relationships);
+        let siblings = iter_adjacent(entity, visibility, adj_ups);
         let span = info_span!("adjust_mesh_rest").entered();
 
         let mut new_acc_triangle = triangle.vertices;
@@ -357,18 +388,18 @@ fn adjust_mesh_height(
                 let (sibling_triangle, _, _, _, _) = chunks.get(sibling)?;
                 let sibling_acc_triangle = acc_triangles.get(sibling)?.as_triangle();
 
-                let cmp = sibling_triangle.cmp_bary(vertex, level.0 as u32);
+                let cmp = sibling_triangle.cmp_point(vertex, level.0 as u32);
                 match cmp {
-                    TriangleCmp::Corner(i) => {
+                    TrianglePointCmp::Corner(i) => {
                         *acc = sibling_acc_triangle.vertices[i];
                         break;
                     }
-                    TriangleCmp::Edge { v0, v1, t } => {
+                    TrianglePointCmp::Edge { v0, v1, t } => {
                         *acc = sibling_acc_triangle.vertices[v0]
                             .lerp(sibling_acc_triangle.vertices[v1], t);
                         break;
                     }
-                    TriangleCmp::Outside | TriangleCmp::Inside => {}
+                    TrianglePointCmp::Outside | TrianglePointCmp::Inside => {}
                 }
             }
         }
@@ -505,13 +536,17 @@ fn toggle_lods(
                 }
             }
         } else {
-            // Hide self
-            debug!("hiding chunk {entity:?}");
-            *visible = Visibility::Hidden;
-
-            // Queue all children for checking
             if let Ok(children) = children.get(entity) {
+                // Hide self
+                debug!("hiding chunk {entity:?}");
+                *visible = Visibility::Hidden;
+
+                // Queue all children for checking
                 queue.extend(children.0.clone());
+            } else {
+                // No children, so we'll have to show this one at close range
+                debug!("showing chunk {entity:?} (last layer)");
+                *visible = Visibility::Visible;
             }
         }
     }
@@ -601,11 +636,12 @@ impl Plugin for ChunkPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, init_world)
             .add_observer(subdivide_chunk)
+            .add_observer(calc_adjacent_chunks)
             // Manual systems
             .add_systems(
                 Update,
                 (
-                    // subdivide_random_chunks.run_if(input_just_pressed(KeyCode::Space)),
+                    subdivide_random_chunks.run_if(input_just_pressed(KeyCode::Space)),
                     // subdivide_smallest_chunks.run_if(input_just_pressed(KeyCode::Space)),
                     // subdivide_close_chunks.run_if(input_just_pressed(KeyCode::Space)),
                     adjust_mesh_height.run_if(input_just_pressed(KeyCode::KeyL)),
@@ -614,7 +650,12 @@ impl Plugin for ChunkPlugin {
             // Automagic LOD stuff
             .add_systems(
                 Update,
-                ((subdivide_close_chunks, toggle_lods, adjust_mesh_height).chain(),),
+                ((
+                    subdivide_close_chunks, //
+                    toggle_lods,
+                    adjust_mesh_height,
+                )
+                    .chain(),),
             )
             .add_systems(Startup, init_player)
             .add_systems(Update, move_player);
@@ -633,7 +674,7 @@ mod tests {
     use glam::Vec3A;
 
     use crate::{
-        chunks::{Triangle, TriangleCmp, arc_distance},
+        chunks::{Triangle, TrianglePointCmp, arc_distance},
         math::almost_equal,
     };
 
@@ -682,22 +723,22 @@ mod tests {
             Vec3A::new(0.3353182, 0.46525362, 0.81920743),  // shared
         ]);
 
-        let t0_t1 = triangle0.vertices.map(|v| triangle1.cmp_bary(v, 4));
-        let t1_t0 = triangle1.vertices.map(|v| triangle0.cmp_bary(v, 4));
+        let t0_t1 = triangle0.vertices.map(|v| triangle1.cmp_point(v, 4));
+        let t1_t0 = triangle1.vertices.map(|v| triangle0.cmp_point(v, 4));
         assert_matches!(
             t0_t1,
             [
-                TriangleCmp::Corner(_),
-                TriangleCmp::Outside,
-                TriangleCmp::Corner(_),
+                TrianglePointCmp::Corner(_),
+                TrianglePointCmp::Outside,
+                TrianglePointCmp::Corner(_),
             ]
         );
         assert_matches!(
             t1_t0,
             [
-                TriangleCmp::Outside,
-                TriangleCmp::Corner(_),
-                TriangleCmp::Corner(_),
+                TrianglePointCmp::Outside,
+                TrianglePointCmp::Corner(_),
+                TrianglePointCmp::Corner(_),
             ]
         );
 
@@ -712,22 +753,22 @@ mod tests {
             Vec3A::new(-0.28, -0.45, -0.85),
             Vec3A::new(-0.89, -0.45, 0.00),
         ]);
-        let t0_t1 = triangle0.vertices.map(|v| triangle1.cmp_bary(v, 4));
-        let t1_t0 = triangle1.vertices.map(|v| triangle0.cmp_bary(v, 4));
+        let t0_t1 = triangle0.vertices.map(|v| triangle1.cmp_point(v, 4));
+        let t1_t0 = triangle1.vertices.map(|v| triangle0.cmp_point(v, 4));
         assert_matches!(
             t0_t1,
             [
-                TriangleCmp::Outside,
-                TriangleCmp::Outside,
-                TriangleCmp::Outside,
+                TrianglePointCmp::Outside,
+                TrianglePointCmp::Outside,
+                TrianglePointCmp::Outside,
             ]
         );
         assert_matches!(
             t1_t0,
             [
-                TriangleCmp::Outside,
-                TriangleCmp::Outside,
-                TriangleCmp::Outside,
+                TrianglePointCmp::Outside,
+                TrianglePointCmp::Outside,
+                TrianglePointCmp::Outside,
             ]
         );
         println!("=======================================");
@@ -744,22 +785,22 @@ mod tests {
             Vec3A::new(-0.2763932, -0.4472136, -0.8506508),
         ]);
 
-        let t0_t1 = triangle0.vertices.map(|v| triangle1.cmp_bary(v, 4));
-        let t1_t0 = triangle1.vertices.map(|v| triangle0.cmp_bary(v, 4));
+        let t0_t1 = triangle0.vertices.map(|v| triangle1.cmp_point(v, 4));
+        let t1_t0 = triangle1.vertices.map(|v| triangle0.cmp_point(v, 4));
         assert_matches!(
             t0_t1,
             [
-                TriangleCmp::Outside,
-                TriangleCmp::Outside,
-                TriangleCmp::Outside,
+                TrianglePointCmp::Outside,
+                TrianglePointCmp::Outside,
+                TrianglePointCmp::Outside,
             ]
         );
         assert_matches!(
             t1_t0,
             [
-                TriangleCmp::Outside,
-                TriangleCmp::Outside,
-                TriangleCmp::Outside,
+                TrianglePointCmp::Outside,
+                TrianglePointCmp::Outside,
+                TrianglePointCmp::Outside,
             ]
         );
     }
