@@ -1,4 +1,7 @@
-use std::{collections::VecDeque, f32::consts::TAU};
+use std::{
+    collections::VecDeque,
+    f32::consts::{FRAC_PI_2, PI, TAU},
+};
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -151,6 +154,12 @@ impl Triangle {
     /// Centre point on unit circle
     pub fn centre(&self) -> Vec3A {
         (self.0.iter().sum::<Vec3A>() / 3.).normalize()
+    }
+
+    fn normal(&self) -> Vec3A {
+        (self.0[1] - self.0[0])
+            .cross(self.0[2] - self.0[1])
+            .normalize()
     }
 
     /// Distance between centre point and edge midpoint in radians
@@ -414,6 +423,7 @@ fn iter_adjacent(
     let mut chunks = vec![];
     while let Some(candidate) = queue.pop_front() {
         let (triangle, level, children, disabled) = relationships.get(candidate).unwrap();
+
         let cmp = test_triangle
             .0
             .map(|v| triangle.cmp_bary(v, test_level.0.max(level.0) as u32));
@@ -428,8 +438,6 @@ fn iter_adjacent(
             };
             cmp_counts[i] += 1;
         }
-
-        println!("{:?} -> {:?}: {:?}", entity, candidate, cmp_counts);
 
         match cmp_counts {
             // [O C E I]
@@ -450,14 +458,13 @@ fn iter_adjacent(
             }
 
             // Direct sibling
-            [1, 2, _, _] |
+            [1, 2, _, _] => {}
             // (gr)unc corner-edge
             [1, 1, 1, _] |
             // (gr)unc edge-edge
             [1, _, 2, _] |
             // Corner on edge but not adjacent
             [2, _, 1, _] => {
-                // An edge is shared with this triangle
                 if disabled {
                     // Adjacent disabled chunk
                     let children = children.expect("Ancestor chunks must have children");
@@ -549,8 +556,9 @@ fn adjust_mesh_height(
         let siblings = iter_adjacent(entity, &world, relationships);
         println!("siblings: {:?}", siblings);
 
-        let mut to_change = vec![];
-        for vertex in triangle.0.iter().copied() {
+        let mut new_acc_triangle = triangle.0;
+
+        for (vertex, acc) in triangle.0.iter().copied().zip(new_acc_triangle.iter_mut()) {
             // Find the first sibling who I either share a vertex with, or my vertex is on their
             // edge.
             println!("----------------------------------------------------");
@@ -559,50 +567,22 @@ fn adjust_mesh_height(
                 let (sibling_triangle, _, _, _, _) = chunks.get(sibling)?;
                 let sibling_acc_triangle = acc_triangles.get(sibling)?.as_triangle();
 
-                let cmp_tri = sibling_triangle.cmp_bary(vertex, level.0 as u32);
-                println!(
-                    "point: {:.2?}, tri (size {:.3}): {:?} acc  {:?}",
-                    vertex,
-                    sibling_triangle.edge_arc_radius(),
-                    sibling_triangle,
-                    sibling_acc_triangle
-                );
-                println!("cmp tri: {cmp_tri:.2?}");
-                match cmp_tri {
+                let cmp = sibling_triangle.cmp_bary(vertex, level.0 as u32);
+                match cmp {
                     TriangleCmp::Corner(i) => {
-                        to_change.push(sibling_acc_triangle.0[i]);
+                        *acc = sibling_acc_triangle.0[i];
                         break;
                     }
                     TriangleCmp::Edge { v0, v1, t } => {
-                        let v = sibling_acc_triangle.0[v0].lerp(sibling_acc_triangle.0[v1], t);
-
-                        to_change.push(v);
+                        *acc = sibling_acc_triangle.0[v0].lerp(sibling_acc_triangle.0[v1], t);
                         break;
                     }
                     TriangleCmp::Outside | TriangleCmp::Inside => {}
                 }
             }
         }
-        if to_change.len() < 3 {
-            println!(">>> CHUNKS <<<");
-            let mut s = VecDeque::from(world.root_chunks);
-            while let Some(e) = s.pop_front() {
-                let (triangle, _, children, _, d) = chunks.get(e).unwrap();
-                if let Some(children) = children {
-                    s.extend(children.0.iter().copied());
-                }
-                println!("{e:?} {d:?} {triangle:?}");
-            }
-        }
 
-        assert_eq!(
-            to_change.len(),
-            3,
-            "All vertices should have a matching triangle, since we've collected all adjacent triangles above. {:?}",
-            triangle,
-        );
-
-        // Apply vertex changes
+        // Update mesh
         let mesh = mesh_handles.get(entity).expect("mesh");
         let mut mesh = meshes
             .get_mut(mesh.id())
@@ -614,14 +594,11 @@ fn adjust_mesh_height(
         let VertexAttributeValues::Float32x3(positions) = positions else {
             panic!("Unexpected data type");
         };
+        *positions.as_mut_array().unwrap() = new_acc_triangle.map(|v| v.to_array());
 
+        // Update acc triangle
         let mut acc_triangle = acc_triangles.get_mut(entity)?;
-        for (i, new_value) in to_change.iter().enumerate() {
-            // Update mesh
-            positions[i] = new_value.to_array();
-            // Update acc triangle
-            acc_triangle.0[i] = *new_value;
-        }
+        acc_triangle.0 = new_acc_triangle;
     }
 
     Ok(())
@@ -661,14 +638,53 @@ fn subdivide_smallest_chunks(
         });
 }
 
-fn draw_entities(mut gizmos: Gizmos, chunks: Query<(Entity, &Triangle)>) {
+fn draw_gizmos(mut gizmos: Gizmos, chunks: Query<(Entity, &AccTriangle)>) {
+    const RED: Color = Color::srgb(1., 0., 0.);
+    const GREEN: Color = Color::srgb(0., 1., 0.);
+    const BLUE: Color = Color::srgb(0., 0., 1.);
+
+    // World axes
+    let axes = [
+        (Vec3::X, RED, "X"),
+        (Vec3::Y, BLUE, "Y"),
+        (Vec3::Z, GREEN, "Z"),
+    ];
+
+    for (p, c, name) in axes {
+        gizmos.line(Vec3::ZERO, p * 10., c);
+        gizmos.text(
+            Isometry3d::from_translation(p * 2. + p.any_orthonormal_vector() * 0.2),
+            name,
+            0.2,
+            Vec2::ZERO,
+            c,
+        );
+    }
+
+    // Triangle faces
     for (entity, triangle) in chunks {
-        let translation = triangle.centre().to_vec3();
+        let triangle = triangle.as_triangle();
+        let centre = triangle.0.iter().sum::<Vec3A>() / 3.;
+        let translation = centre + triangle.normal() * 0.01;
+
+        // Local transform matrix
+        let forward = triangle.normal().normalize().to_vec3();
+        let right = Vec3::Y.cross(forward).normalize();
+        let up = forward.cross(right).normalize();
+        let mat = Mat3::from_cols(right, up, forward);
+        let rotation = Quat::from_mat3(&mat);
+
+        // Local axes
+        let scale = triangle.corner_arc_radius();
+        let t = translation.to_vec3();
+        gizmos.line(t, t + forward * scale * 0.2, GREEN);
+        gizmos.line(t, t + right * scale * 0.2, RED);
+        gizmos.line(t, t + up * scale * 0.2, BLUE);
 
         gizmos.text(
-            Isometry3d::new(translation * 1.1, Quat::IDENTITY),
+            Isometry3d::new(translation.to_vec3(), rotation),
             &format!("{entity:?}"),
-            0.2 * triangle.corner_arc_radius(),
+            0.15 * scale,
             Vec2::ZERO,
             Color::WHITE,
         );
@@ -689,7 +705,7 @@ impl Plugin for ChunkPlugin {
                     adjust_mesh_height.run_if(input_just_pressed(KeyCode::KeyL)),
                 ),
             )
-            .add_systems(Update, draw_entities);
+            .add_systems(Update, draw_gizmos);
     }
 }
 
