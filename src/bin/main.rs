@@ -68,7 +68,7 @@ fn update_mesh(
     mut should_regen: ResMut<ShouldRegenerateMesh>,
 ) {
     info!("Regenerating mesh");
-    let mesh = meshes.get_mut(mesh.0.id()).expect("mesh not found");
+    let mut mesh = meshes.get_mut(mesh.0.id()).expect("mesh not found");
 
     // Recompute height map & normals based with new noise function
     let noise = noise_config.generator();
@@ -163,8 +163,8 @@ fn main() {
         .add_plugins(WireframePlugin::default())
         .add_systems(Startup, |mut c: ResMut<WireframeConfig>| c.global = true)
         // UI
-        .add_plugins(EguiPlugin::default())
-        .add_systems(EguiPrimaryContextPass, draw_ui)
+        // .add_plugins(EguiPlugin::default())
+        // .add_systems(EguiPrimaryContextPass, draw_ui)
         .insert_resource(ClearColor(Color::BLACK))
         // Assets
         .add_systems(PreStartup, load_assets)
