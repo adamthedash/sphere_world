@@ -1,4 +1,4 @@
-use glam::{Mat3A, Vec2, Vec3A};
+use glam::{Mat3A, UVec3, Vec2, Vec3A};
 use itertools::Itertools;
 use num::rational::Ratio;
 
@@ -36,12 +36,15 @@ impl Barycentric {
         if !numerator.iter().all(|n| (0..=denom as i32).contains(n)) {
             return None;
         }
-        let distances = numerator.map(|n| Ratio::new(n as u32, denom));
 
-        Some(BarycentricSnapped {
-            distances,
-            length: self.length,
-        })
+        let distances = UVec3::from_array(numerator.map(|n| n as u32));
+
+        assert_eq!(
+            distances.element_sum(),
+            denom,
+            "Bary distances must sum to 1"
+        );
+        Some(BarycentricSnapped::new(distances, self.length))
     }
 }
 
@@ -49,9 +52,28 @@ impl Barycentric {
 pub struct BarycentricSnapped {
     /// Sum normalised to 1
     /// Distances from edge opposite vertices [2, 0, 1]
-    pub distances: [Ratio<u32>; 3],
+    pub distances: UVec3,
+
+    pub denominator: u32,
     /// Signed vector length through origin
     pub length: f32,
+}
+
+impl BarycentricSnapped {
+    pub fn new(distances: UVec3, length: f32) -> Self {
+        let denominator = distances.element_sum();
+        Self {
+            distances,
+            denominator,
+            length,
+        }
+    }
+
+    pub fn as_ratios(self) -> [Ratio<u32>; 3] {
+        self.distances
+            .to_array()
+            .map(|n| Ratio::new(n, self.denominator))
+    }
 }
 
 /// A 1d point along the edge of one pentagon

@@ -13,7 +13,6 @@ use sphere_world::{
     assets::load_assets,
     chunks::ChunkPlugin,
     noise::{NoiseChanged, NoiseConfig, NoiseConfigWidget},
-    polar::PolarCoord,
 };
 
 fn drag_camera(
@@ -48,7 +47,6 @@ fn zoom_camera(
 
 struct SphereData {
     origin: Vec3A,
-    polar: PolarCoord,
     normal: Vec3A,
     uv: [f32; 2],
     height: f32,
@@ -77,12 +75,7 @@ fn update_mesh(
         .0
         .raw_data()
         .iter()
-        .map(|d| {
-            // let height = noise.get(d.origin.to_array().map(|x| x as f64));
-            // let point = d.origin * (1. + height as f32);
-            // point.to_array()
-            d.origin.to_array()
-        })
+        .map(|d| d.origin.to_array())
         .collect::<Vec<_>>();
 
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, points);

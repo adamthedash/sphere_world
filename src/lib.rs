@@ -9,6 +9,6 @@ pub mod bary;
 pub mod chunks;
 pub mod drag_value;
 pub mod math;
+pub mod mesh;
 pub mod noise;
-pub mod polar;
 pub mod triangle;

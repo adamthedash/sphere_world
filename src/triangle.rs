@@ -87,21 +87,22 @@ impl Triangle {
             return TrianglePointCmp::Outside;
         };
 
-        if let Some(i) = bary.distances.iter().position(|d| d.is_one()) {
+        if let Some(i) = bary
+            .distances
+            .to_array()
+            .iter()
+            .position(|n| *n == subdivisions)
+        {
             // Corner oposite this edge
             return TrianglePointCmp::Corner((i + 2) % 3);
         }
 
-        if let Some(i) = bary.distances.iter().position(|d| d.is_zero()) {
+        if let Some(i) = bary.distances.to_array().iter().position(|n| *n == 0) {
             let i0 = i;
             let i1 = (i + 1) % 3;
             // Along this edge
-            let t = bary.distances[(i + 2) % 3];
-            return TrianglePointCmp::Edge {
-                v0: i0,
-                v1: i1,
-                t: t.to_f32().unwrap(),
-            };
+            let t = bary.distances[(i + 2) % 3] as f32 / bary.denominator as f32;
+            return TrianglePointCmp::Edge { v0: i0, v1: i1, t };
         }
 
         // Inside
