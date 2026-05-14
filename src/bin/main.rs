@@ -2,7 +2,10 @@ use std::path::Path;
 
 use bevy::{
     ecs::error::Result,
-    input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll},
+    input::{
+        common_conditions::input_just_pressed,
+        mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll},
+    },
     pbr::wireframe::{WireframeConfig, WireframePlugin},
     prelude::*,
 };
@@ -104,17 +107,6 @@ fn setup(mut commands: Commands) {
     ));
 }
 
-#[derive(Resource)]
-struct SphereConfig {
-    num_subdivisions: usize,
-}
-
-impl SphereConfig {
-    pub fn generate_sphere(&self) -> Planet {
-        todo!()
-    }
-}
-
 fn draw_ui(
     mut contexts: EguiContexts,
     mut noise_config: ResMut<NoiseConfig>,
@@ -154,7 +146,11 @@ fn main() {
         .add_plugins(DefaultPlugins.set(ImagePlugin::default_nearest()))
         // Wireframe
         .add_plugins(WireframePlugin::default())
-        .add_systems(Startup, |mut c: ResMut<WireframeConfig>| c.global = true)
+        .add_systems(
+            Update,
+            { |mut c: ResMut<WireframeConfig>| c.global ^= true }
+                .run_if(input_just_pressed(KeyCode::KeyW)),
+        )
         // UI
         // .add_plugins(EguiPlugin::default())
         // .add_systems(EguiPrimaryContextPass, draw_ui)

@@ -7,6 +7,8 @@ use num::ToPrimitive;
 
 use crate::bary::BarycentricSnapped;
 
+const MESH_SUBDIVISIONS: u32 = 4;
+
 /// Index into the mesh vertices
 fn bary_to_index(bary: BarycentricSnapped) -> u32 {
     let [x, y, z] = bary.distances.to_array();

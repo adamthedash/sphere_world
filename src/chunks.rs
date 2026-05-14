@@ -418,6 +418,8 @@ fn adjust_mesh_height(
         };
         *positions.as_mut_array().unwrap() = new_acc_triangle.map(|v| v.to_array());
 
+        mesh.compute_normals();
+
         // Update acc triangle
         let mut acc_triangle = acc_triangles.get_mut(entity)?;
         acc_triangle.0 = new_acc_triangle;
