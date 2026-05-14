@@ -6,7 +6,6 @@ use bevy::{
     prelude::*,
 };
 use itertools::Itertools;
-use num::{One, ToPrimitive, Zero};
 
 use crate::{bary::cartesian_to_barycentric, math::arc_distance};
 

@@ -32,7 +32,24 @@ impl Barycentric {
         }
 
         let denom = 2_u32.pow(num_subdivisions);
-        let numerator = self.distances.map(|d| (d * denom as f32).round() as i32);
+        let numerator = self.distances.map(|d| d * denom as f32);
+
+        // Custom rounding - Fractional weight is assigned to closest axes
+        let mut ints = numerator.map(|n| n.trunc() as i32);
+        let mut fracts = numerator.map(|n| n.fract());
+        let total_fracts = fracts.iter().sum::<f32>().round() as u32;
+        for _ in 0..total_fracts {
+            // Assign the full weight to closest point
+            let i = fracts
+                .iter()
+                .position_max_by(|a, b| a.total_cmp(b))
+                .unwrap();
+            ints[i] += 1;
+            fracts[i] -= 1.;
+        }
+
+        let numerator = ints;
+
         if !numerator.iter().all(|n| (0..=denom as i32).contains(n)) {
             return None;
         }
@@ -42,13 +59,16 @@ impl Barycentric {
         assert_eq!(
             distances.element_sum(),
             denom,
-            "Bary distances must sum to 1"
+            "Bary distances must sum to 1, converted {:?} -> {:?} nsubs: {:?}",
+            self,
+            (distances, denom),
+            num_subdivisions
         );
         Some(BarycentricSnapped::new(distances, self.length))
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BarycentricSnapped {
     /// Sum normalised to 1
     /// Distances from edge opposite vertices [2, 0, 1]
@@ -157,10 +177,11 @@ pub fn cartesian_to_barycentric(triangle: [Vec3A; 3], point: Vec3A) -> Barycentr
 mod tests {
     use std::{assert_matches, f32::consts::GOLDEN_RATIO};
 
-    use glam::{Mat3A, Vec3A};
+    use glam::{Mat3A, UVec3, Vec3A};
 
     use crate::bary::{
-        Barycentric, EdgeLength, TriangularCoord, cartesian_to_barycentric, cartesian_to_triangular,
+        Barycentric, BarycentricSnapped, EdgeLength, TriangularCoord, cartesian_to_barycentric,
+        cartesian_to_triangular,
     };
 
     #[test]
@@ -242,15 +263,26 @@ mod tests {
             }
         );
 
-        let bary2 = bary.snap_even(0);
-        println!("{:?}", bary2);
-        let bary2 = bary.snap_even(1);
-        println!("{:?}", bary2);
-        let bary2 = bary.snap_even(2);
-        println!("{:?}", bary2);
+        // Case was failing due to snapped coords not summing to 1
+        let bary = Barycentric {
+            distances: [0.033546187, 0.6403883, 0.32606557],
+            length: 1.1677722,
+        };
+        let snapped = bary.snap_even(5).unwrap();
+        assert_eq!(
+            snapped,
+            BarycentricSnapped::new(UVec3::new(1, 21, 10), bary.length)
+        );
 
-        let basis = Mat3A::from_cols(triangle[0], triangle[1], triangle[2]);
-        let projected = basis.inverse() * -point;
-        println!("proj: {:?}", projected);
+        // Case was failing due to snapped coords not summing to 1
+        let bary = Barycentric {
+            distances: [5.5879354e-9, 0.49999994, 0.4999999],
+            length: 1.0422658,
+        };
+        let snapped = bary.snap_even(2).unwrap();
+        assert_eq!(
+            snapped,
+            BarycentricSnapped::new(UVec3::new(0, 2, 2), bary.length)
+        );
     }
 }
