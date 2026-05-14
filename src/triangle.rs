@@ -91,7 +91,7 @@ impl Triangle {
             .distances
             .to_array()
             .iter()
-            .position(|n| *n == subdivisions)
+            .position(|n| *n == bary.denominator)
         {
             // Corner oposite this edge
             return TrianglePointCmp::Corner((i + 2) % 3);
@@ -157,7 +157,13 @@ impl Triangle {
             [2, 1, _, _] => {
                 TriangleTriangleCmp::Unrelated
             }
-            x => unreachable!("Invalid combination: {:?}", x),
+            x => {
+                let cmp_pretty = "OCEI".chars().zip(x)
+                    .filter(|(_, n)| *n > 0)
+                    .map(|(c, n)| format!("{c}{n} "))
+                    .collect::<String>();
+                unreachable!("Invalid combination: {:?} {:?} -> {:?}", cmp_pretty, self.vertices, other.vertices);
+            },
         }
     }
 
