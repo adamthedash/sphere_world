@@ -7,7 +7,10 @@ use bevy::{
 };
 use itertools::Itertools;
 
-use crate::{bary::cartesian_to_barycentric, math::arc_distance};
+use crate::{
+    bary::{BarycentricSnapped, cartesian_to_barycentric},
+    math::arc_distance,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub enum TrianglePointCmp {
@@ -75,14 +78,19 @@ impl Triangle {
         arc_distance(self.centre, edge_midpoint)
     }
 
-    pub fn cmp_point(&self, point: Vec3A, subdivisions: u32) -> TrianglePointCmp {
+    /// Get the bary corredinate of this point if it lies within the triangle
+    pub fn cmp_point_bary(&self, point: Vec3A, subdivisions: u32) -> Option<BarycentricSnapped> {
         let bary = cartesian_to_barycentric(self.vertices, point);
         if bary.length < 0. {
             // Other side of world
-            return TrianglePointCmp::Outside;
+            return None;
         }
 
-        let Some(bary) = bary.snap_even(subdivisions) else {
+        bary.snap_even(subdivisions)
+    }
+
+    pub fn cmp_point(&self, point: Vec3A, subdivisions: u32) -> TrianglePointCmp {
+        let Some(bary) = self.cmp_point_bary(point, subdivisions) else {
             return TrianglePointCmp::Outside;
         };
 

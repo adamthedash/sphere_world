@@ -10,11 +10,13 @@ use bevy::{
 use glam::{Vec2, Vec3A};
 use hexasphere::shapes::IcoSphere;
 use itertools::Itertools;
-use rand::seq::IteratorRandom;
+use num::{Integer, rational::Ratio, traits::Euclid};
+use rand::{SeedableRng, seq::IteratorRandom};
 
 use crate::{
     assets::AssetHandles,
     math::arc_distance,
+    mesh::{MESH_SUBDIVISIONS, bary_to_index, base_mesh_to_triangle, create_bary_mesh},
     triangle::{Triangle, TrianglePointCmp, TriangleTriangleCmp},
 };
 
@@ -63,15 +65,20 @@ impl AccTriangle {
 #[derive(Component, Debug)]
 pub struct SubdivisionLevel(usize);
 
+/// "Base" mesh before any stitching
+#[derive(Component, Debug)]
+pub struct BaseMesh(Mesh3d);
+
 #[derive(Bundle)]
 pub struct ChunkBundle {
     pub pos: ChunkPos,
     pub triangle: Triangle,
-    pub mesh: Mesh3d,
+    pub acc_mesh: Mesh3d,
     pub transform: Transform,
     pub material: MeshMaterial3d<StandardMaterial>,
     pub acc_triangle: AccTriangle,
     pub subdivision: SubdivisionLevel,
+    pub base_mesh: BaseMesh,
 }
 
 #[derive(Component)]
@@ -199,16 +206,29 @@ pub fn subdivide_chunk(
     let (triangle, material, level) = chunks.get(event.0)?;
     let new_triangles = triangle.subdivide();
 
+    // TODO: The base mesh is identical for all chunks. Create once and copy
+    let base_mesh = create_bary_mesh(MESH_SUBDIVISIONS);
+
     let new_bundles = new_triangles.map(|t| {
-        let mesh = meshes.add(t.get_mesh());
+        // Base mesh is the "true" mesh for this chunk. It's created once on chunk creation
+        let base_mesh = base_mesh_to_triangle(base_mesh.clone(), t.vertices);
+
+        // Acc mesh is the mesh that's rendered. It's a modified version of the base mesh
+        // depending on what's happening with ajacent chunks
+        let acc_mesh = base_mesh.clone();
+
+        let base_mesh = meshes.add(base_mesh);
+        let acc_mesh = meshes.add(acc_mesh);
+
         ChunkBundle {
             pos: ChunkPos(t.centre.normalize()),
             triangle: t,
-            mesh: Mesh3d(mesh),
             transform: Transform::IDENTITY,
             material: material.clone(),
             acc_triangle: AccTriangle(t.vertices),
             subdivision: SubdivisionLevel(level.0 + 1),
+            base_mesh: BaseMesh(Mesh3d(base_mesh)),
+            acc_mesh: Mesh3d(acc_mesh),
         }
     });
 
@@ -274,11 +294,21 @@ fn init_world(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, assets: 
         }
     }
 
+    // TODO: create once and clone
+    let base_mesh = create_bary_mesh(MESH_SUBDIVISIONS);
+
     // Spawn shape
     let chunks = triangles
         .map(|triangle| {
-            let mesh = triangle.get_mesh();
-            let mesh = meshes.add(mesh);
+            // Base mesh is the "true" mesh for this chunk. It's created once on chunk creation
+            let base_mesh = base_mesh_to_triangle(base_mesh.clone(), triangle.vertices);
+
+            // Acc mesh is the mesh that's rendered. It's a modified version of the base mesh
+            // depending on what's happening with ajacent chunks
+            let acc_mesh = base_mesh.clone();
+
+            let base_mesh = meshes.add(base_mesh);
+            let acc_mesh = meshes.add(acc_mesh);
 
             let pos = triangle.centre.normalize();
 
@@ -287,11 +317,12 @@ fn init_world(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, assets: 
                     ChunkBundle {
                         pos: ChunkPos(pos),
                         triangle,
-                        mesh: Mesh3d(mesh),
                         transform: Transform::IDENTITY,
                         material: MeshMaterial3d(assets.hue_material.clone()),
                         acc_triangle: AccTriangle(triangle.vertices),
                         subdivision: SubdivisionLevel(0),
+                        base_mesh: BaseMesh(Mesh3d(base_mesh)),
+                        acc_mesh: Mesh3d(acc_mesh),
                     },
                     Visibility::Hidden,
                 ))
@@ -335,9 +366,9 @@ fn iter_adjacent(
 
 fn adjust_mesh_height(
     world: Res<WorldRoot>,
-    mesh_handles: Query<&Mesh3d>,
+    acc_mesh_handles: Query<&Mesh3d>,
+    base_mesh_handles: Query<&BaseMesh>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut acc_triangles: Query<&mut AccTriangle>,
     chunks: Query<(
         &Triangle,
         &SubdivisionLevel,
@@ -372,58 +403,149 @@ fn adjust_mesh_height(
 
         // Get list of active adjacent chunks
         let siblings = iter_adjacent(entity, visibility, adj_ups);
-        let span = info_span!("adjust_mesh_rest").entered();
 
-        let mut new_acc_triangle = triangle.vertices;
-        for (vertex, acc) in triangle
-            .vertices
-            .iter()
-            .copied()
-            .zip(new_acc_triangle.iter_mut())
-        {
-            // Find the first sibling who I either share a vertex with, or my vertex is on their
-            // edge.
+        // Iterate over edges of this mesh and adjust it down to where the adjacent mesh is
+        let mut mesh_overrides = vec![];
+        for edge in triangle.edges {
+            for sibling in siblings.clone() {
+                let (sibling_triangle, sibling_level, _, _, _) = chunks.get(sibling)?;
+                let e0_bary = sibling_triangle.cmp_point_bary(edge.0, MESH_SUBDIVISIONS);
+                let e1_bary = sibling_triangle.cmp_point_bary(edge.1, MESH_SUBDIVISIONS);
 
-            for sibling in siblings.iter().copied() {
-                let (sibling_triangle, _, _, _, _) = chunks.get(sibling)?;
-                let sibling_acc_triangle = acc_triangles.get(sibling)?.as_triangle();
+                if let Some(e0_bary) = e0_bary
+                    && let Some(e1_bary) = e1_bary
+                {
+                    // Get bary coords for own edge corners
+                    let self_e0_bary = triangle
+                        .cmp_point_bary(edge.0, MESH_SUBDIVISIONS)
+                        .expect("Own edge should always have a bary");
+                    let self_e1_bary = triangle
+                        .cmp_point_bary(edge.1, MESH_SUBDIVISIONS)
+                        .expect("Own edge should always have a bary");
 
-                let cmp = sibling_triangle.cmp_point(vertex, level.0 as u32);
-                match cmp {
-                    TrianglePointCmp::Corner(i) => {
-                        *acc = sibling_acc_triangle.vertices[i];
-                        break;
+                    if entity.index_u32() == 408 {
+                        info!("Edge for {:?} interecting {:?}", entity, sibling);
+                        info!("e0 {:.2?} -> sibling b0 {:?}", edge.0, e0_bary);
+                        info!("e1 {:.2?} -> sibling b1 {:?}", edge.1, e1_bary);
+                        info!("e0 {:.2?} -> self b0 {:?}", edge.0, self_e0_bary);
+                        info!("e1 {:.2?} -> self b1 {:?}", edge.1, self_e1_bary);
                     }
-                    TrianglePointCmp::Edge { v0, v1, t } => {
-                        *acc = sibling_acc_triangle.vertices[v0]
-                            .lerp(sibling_acc_triangle.vertices[v1], t);
-                        break;
+
+                    // Get sibling mesh
+                    let mesh = base_mesh_handles.get(entity).expect("mesh");
+                    let mesh = meshes
+                        .get(mesh.0.id())
+                        .expect("Have a handle, so mesh should exist");
+
+                    let positions = mesh
+                        .attribute(Mesh::ATTRIBUTE_POSITION)
+                        .expect("Mesh should always have positions");
+                    let VertexAttributeValues::Float32x3(positions) = positions else {
+                        panic!("Unexpected data type");
+                    };
+
+                    let level_ratio = 2_u32.pow((level.0 - sibling_level.0) as u32);
+
+                    // Walk along edge of this triangle and sample from adjacent
+                    let mesh_steps = 2_u32.pow(MESH_SUBDIVISIONS);
+                    for i in 0..=mesh_steps {
+                        let self_bary =
+                            self_e0_bary.interp(&self_e1_bary, Ratio::new(i, mesh_steps));
+                        let self_index = bary_to_index(self_bary);
+
+                        let (d, r) = i.div_rem(&level_ratio);
+
+                        let vertex = if r == 0 {
+                            // Take corner directly
+                            let bary = e0_bary.interp(&e1_bary, Ratio::new(i, mesh_steps));
+                            debug!("sampling @ {:?}", bary.distances);
+
+                            let index = bary_to_index(bary);
+                            if entity.index_u32() == 408 {
+                                info!("sibling index {:?} -> self index {:?}", index, self_index);
+                            }
+
+                            positions[index as usize]
+                        } else {
+                            // Interp between d & d+1 by r / ratio
+                            let bary0 =
+                                e0_bary.interp(&e1_bary, Ratio::new(d * level_ratio, mesh_steps));
+                            let bary1 = e0_bary
+                                .interp(&e1_bary, Ratio::new((d + 1) * level_ratio, mesh_steps));
+                            debug!(
+                                "interpolating {:?} - {:?} @ {}/{}",
+                                bary0.distances, bary1.distances, r, level_ratio
+                            );
+
+                            let index0 = bary_to_index(bary0);
+                            let index1 = bary_to_index(bary1);
+                            if entity.index_u32() == 408 {
+                                info!(
+                                    "sibling indexes {:?} + {:?} -> self index {:?}",
+                                    index0, index1, self_index
+                                );
+                            }
+
+                            let vertex0 = positions[index0 as usize];
+                            let vertex1 = positions[index1 as usize];
+                            Vec3A::from_array(vertex0)
+                                .lerp(Vec3A::from_array(vertex1), r as f32 / mesh_steps as f32)
+                                .to_array()
+                        };
+
+                        mesh_overrides.push((self_index, vertex));
                     }
-                    TrianglePointCmp::Outside | TrianglePointCmp::Inside => {}
+
+                    break;
                 }
             }
         }
 
-        // Update mesh
-        let mesh = mesh_handles.get(entity).expect("mesh");
-        let mut mesh = meshes
-            .get_mut(mesh.id())
-            .expect("Have a handle, so mesh should exist");
+        if !mesh_overrides.is_empty() && entity.index_u32() == 408 {
+            info!("overrides: {:.2?}\n", mesh_overrides);
+        }
 
-        let positions = mesh
-            .attribute_mut(Mesh::ATTRIBUTE_POSITION)
-            .expect("Mesh should always have positions");
-        let VertexAttributeValues::Float32x3(positions) = positions else {
-            panic!("Unexpected data type");
+        // Make copy of base mesh to start with
+        let mut base_vertices = {
+            let base_mesh = base_mesh_handles.get(entity).expect("base_mesh");
+            let mesh = meshes
+                .get(base_mesh.0.id())
+                .expect("Have a handle, so mesh should exist");
+
+            let positions = mesh
+                .attribute(Mesh::ATTRIBUTE_POSITION)
+                .expect("Mesh should always have positions");
+            let VertexAttributeValues::Float32x3(positions) = positions else {
+                panic!("Unexpected data type");
+            };
+
+            positions.clone()
         };
-        *positions.as_mut_array().unwrap() = new_acc_triangle.map(|v| v.to_array());
 
-        mesh.compute_normals();
+        // Apply overrides
+        for (i, v) in mesh_overrides {
+            base_vertices[i as usize] = v;
+        }
 
-        // Update acc triangle
-        let mut acc_triangle = acc_triangles.get_mut(entity)?;
-        acc_triangle.0 = new_acc_triangle;
-        drop(span);
+        // Update acc mesh
+        let acc_mesh = acc_mesh_handles.get(entity).expect("acc_mesh");
+        {
+            let mut mesh = meshes
+                .get_mut(acc_mesh.id())
+                .expect("Have a handle, so mesh should exist");
+
+            let positions = mesh
+                .attribute_mut(Mesh::ATTRIBUTE_POSITION)
+                .expect("Mesh should always have positions");
+            let VertexAttributeValues::Float32x3(positions) = positions else {
+                panic!("Unexpected data type");
+            };
+
+            *positions = base_vertices;
+
+            // Recompute normals with new vertices
+            mesh.compute_normals();
+        }
     }
 
     Ok(())
@@ -435,7 +557,7 @@ fn subdivide_random_chunks(
 ) {
     const MAX_CHUNKS: usize = 1;
 
-    let mut rng = rand::rng();
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
     chunks
         .iter()
         .filter(|(_, l)| l.0 < MAX_LOD_LEVEL)
@@ -462,15 +584,18 @@ fn subdivide_smallest_chunks(
         });
 }
 
-const LOD_BORDERS: [f32; 5] = [
-    FRAC_PI_2, // 90+ degrees
-    FRAC_PI_3, // 60+ degrees
-    FRAC_PI_4, // 45+ degrees
-    FRAC_PI_6, // 30+ degrees
-    FRAC_PI_8, // 22.5+ degrees
-               // 0+ degrees
-]
-.map(const |x| x / 2.);
+// const LOD_BORDERS: [f32; 5] = [
+//     FRAC_PI_2, // 90+ degrees
+//     FRAC_PI_3, // 60+ degrees
+//     FRAC_PI_4, // 45+ degrees
+//     FRAC_PI_6, // 30+ degrees
+//     FRAC_PI_8, // 22.5+ degrees
+//                // 0+ degrees
+// ]
+// .map(const |x| x / 2.);
+
+// Debug - show at all times
+const LOD_BORDERS: [f32; 5] = [PI; _];
 const MAX_LOD_LEVEL: usize = LOD_BORDERS.len() + 1;
 
 fn subdivide_close_chunks(
@@ -556,10 +681,11 @@ fn toggle_lods(
     Ok(())
 }
 
-fn draw_gizmos(mut gizmos: Gizmos, chunks: Query<(Entity, &AccTriangle)>) {
+fn draw_gizmos(mut gizmos: Gizmos, chunks: Query<(Entity, &AccTriangle, &Visibility)>) {
     const RED: Color = Color::srgb(1., 0., 0.);
     const GREEN: Color = Color::srgb(0., 1., 0.);
     const BLUE: Color = Color::srgb(0., 0., 1.);
+    const MAGENTA: Color = Color::srgb(1., 0., 1.);
 
     // World axes
     let axes = [
@@ -580,9 +706,13 @@ fn draw_gizmos(mut gizmos: Gizmos, chunks: Query<(Entity, &AccTriangle)>) {
     }
 
     // Triangle faces
-    for (entity, triangle) in chunks {
+    for (entity, triangle, visibility) in chunks {
+        if matches!(visibility, Visibility::Hidden) {
+            continue;
+        }
+
         let triangle = triangle.as_triangle();
-        let translation = triangle.centre + triangle.normal * 0.01;
+        let translation = triangle.centre.normalize() + triangle.normal * 0.1;
 
         // Local transform matrix
         let forward = triangle.normal.to_vec3();
@@ -603,7 +733,7 @@ fn draw_gizmos(mut gizmos: Gizmos, chunks: Query<(Entity, &AccTriangle)>) {
             &format!("{entity:?}"),
             0.15 * scale,
             Vec2::ZERO,
-            Color::WHITE,
+            MAGENTA,
         );
     }
 }
@@ -637,8 +767,6 @@ pub struct ChunkPlugin;
 impl Plugin for ChunkPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, init_world)
-            .add_observer(subdivide_chunk)
-            .add_observer(calc_adjacent_chunks)
             // Manual systems
             .add_systems(
                 Update,
@@ -653,16 +781,18 @@ impl Plugin for ChunkPlugin {
             .add_systems(
                 Update,
                 ((
-                    subdivide_close_chunks, //
+                    // subdivide_close_chunks, //
                     toggle_lods,
                     adjust_mesh_height,
                 )
                     .chain(),),
             )
+            .add_observer(subdivide_chunk)
+            .add_observer(calc_adjacent_chunks)
+            // Rotating moon
             .add_systems(Startup, init_player)
-            .add_systems(Update, move_player);
-
-        // .add_systems(Update, draw_gizmos);
+            .add_systems(Update, move_player)
+            .add_systems(Update, draw_gizmos);
     }
 }
 

@@ -1,6 +1,6 @@
 use glam::{Mat3A, UVec3, Vec2, Vec3A};
 use itertools::Itertools;
-use num::rational::Ratio;
+use num::{Integer, ToPrimitive, rational::Ratio};
 
 use crate::math::almost_equal;
 
@@ -89,10 +89,38 @@ impl BarycentricSnapped {
         }
     }
 
-    pub fn as_ratios(self) -> [Ratio<u32>; 3] {
+    pub fn as_ratios(&self) -> [Ratio<u32>; 3] {
         self.distances
             .to_array()
             .map(|n| Ratio::new(n, self.denominator))
+    }
+
+    /// Linearly interpolate between the two coordinates.  
+    pub fn interp(&self, other: &Self, ratio: Ratio<u32>) -> Self {
+        assert!(
+            ratio.numer() <= ratio.denom(),
+            "Only interpolation in 0-1 is supported"
+        );
+        assert_eq!(self.denominator, other.denominator);
+
+        let diff = other.distances.as_ivec3() - self.distances.as_ivec3();
+        assert!(
+            diff.to_array()
+                .iter()
+                .all(|p| p.is_multiple_of(&(*ratio.denom() as i32))),
+            "Ratio not on grid"
+        );
+
+        let distances = (self.distances.as_ivec3()
+            + diff * *ratio.numer() as i32 / *ratio.denom() as i32)
+            .as_uvec3();
+        let length = self.length * ratio.to_f32().unwrap();
+
+        Self {
+            distances,
+            denominator: self.denominator,
+            length,
+        }
     }
 }
 
@@ -178,6 +206,7 @@ mod tests {
     use std::{assert_matches, f32::consts::GOLDEN_RATIO};
 
     use glam::{Mat3A, UVec3, Vec3A};
+    use num::rational::Ratio;
 
     use crate::bary::{
         Barycentric, BarycentricSnapped, EdgeLength, TriangularCoord, cartesian_to_barycentric,
@@ -262,7 +291,10 @@ mod tests {
                 length: 2.
             }
         );
+    }
 
+    #[test]
+    fn test_snap() {
         // Case was failing due to snapped coords not summing to 1
         let bary = Barycentric {
             distances: [0.033546187, 0.6403883, 0.32606557],
@@ -284,5 +316,17 @@ mod tests {
             snapped,
             BarycentricSnapped::new(UVec3::new(0, 2, 2), bary.length)
         );
+    }
+
+    #[test]
+    fn test_interp() {
+        let b0 = BarycentricSnapped::new([0, 0, 16].into(), 1.);
+        let b1 = BarycentricSnapped::new([16, 0, 0].into(), 1.);
+        let b = b0.interp(&b1, Ratio::ZERO);
+        assert_eq!(b.distances.to_array(), [0, 0, 16]);
+        let b = b0.interp(&b1, Ratio::ONE);
+        assert_eq!(b.distances.to_array(), [16, 0, 0]);
+        let b = b0.interp(&b1, Ratio::new(1, 2));
+        assert_eq!(b.distances.to_array(), [8, 0, 8]);
     }
 }
