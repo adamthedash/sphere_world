@@ -242,13 +242,8 @@ impl BaryIterative {
             assert!(v.is_normalized(), "Traingle must be geocentric");
         }
 
-        // Slerp along one edge
-        let edge_weight_v0_v1 = if self.weights[1] == 0 {
-            0.
-        } else {
-            self.weights[1] as f32 / (self.denominator - self.weights[2]) as f32
-        };
-
+        // Slerp along each edge towards v1
+        let edge_weight_v0_v1 = self.weights[1] as f32 / self.denominator as f32;
         let edge_weight_v2_v1 = edge_weight_v0_v1;
 
         let mid_weight = if self.weights[2] == 0 {
@@ -373,7 +368,7 @@ impl BaryIterative {
 
 #[cfg(test)]
 mod tests {
-    use std::f32::consts::GOLDEN_RATIO;
+    use std::f32::consts::{FRAC_PI_4, GOLDEN_RATIO};
 
     use glam::Vec3A;
 
@@ -456,5 +451,17 @@ mod tests {
             let bary = BaryIterative::from_cartesian(triangle, point, 4);
             assert!(bary.is_none(), "{bary:?}");
         }
+    }
+
+    #[test]
+    fn test_to_cart() {
+        let triangle = [Vec3A::X, Vec3A::Y, Vec3A::Z];
+
+        let bary = BaryIterative::new([0, 1, 1].into(), 1.);
+
+        assert_eq!(
+            bary.to_cartesian(triangle),
+            Vec3A::new(0., 1., 1.) * FRAC_PI_4.sin()
+        );
     }
 }

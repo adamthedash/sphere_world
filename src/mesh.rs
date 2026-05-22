@@ -87,6 +87,8 @@ pub fn base_mesh_to_triangle(mut mesh: Mesh, triangle: [Vec3A; 3]) -> Mesh {
 
     // Walk over bary and convert to cartesian
     for p in positions {
+        let b = BaryIterative::from_float_weights(*p, 1., MESH_SUBDIVISIONS);
+        println!("{p:?} -> {b}");
         *p = BaryIterative::from_float_weights(*p, 1., MESH_SUBDIVISIONS)
             .to_cartesian(triangle)
             .to_array();
@@ -97,6 +99,8 @@ pub fn base_mesh_to_triangle(mut mesh: Mesh, triangle: [Vec3A; 3]) -> Mesh {
 
 #[cfg(test)]
 mod tests {
+    use std::f32::consts::{FRAC_PI_4, PI};
+
     use bevy::mesh::{Mesh, VertexAttributeValues};
     use glam::Vec3A;
 
@@ -107,13 +111,19 @@ mod tests {
 
     #[test]
     fn test_mesh() {
-        fn print_mesh(mesh: &Mesh) {
+        fn get_vertices(mesh: &Mesh) -> &[[f32; 3]] {
             let positions = mesh
                 .attribute(Mesh::ATTRIBUTE_POSITION)
                 .expect("base mesh has vertices");
             let VertexAttributeValues::Float32x3(positions) = positions else {
                 unreachable!("Bad vertex type");
             };
+
+            positions
+        }
+
+        fn print_mesh(mesh: &Mesh) {
+            let positions = get_vertices(mesh);
 
             for (i, p) in positions.iter().enumerate() {
                 println!("{i} {p:.2?}");
@@ -128,10 +138,32 @@ mod tests {
         let mesh = create_bary_mesh(1);
         print_mesh(&mesh);
         println!();
+        assert_eq!(
+            get_vertices(&mesh),
+            &[
+                [0., 1., 0.],
+                [0.5, 0.5, 0.],
+                [1., 0., 0.,],
+                [0., 0.5, 0.5],
+                [0.5, 0., 0.5],
+                [0., 0., 1.],
+            ]
+        );
 
         let triangle = Triangle::new([Vec3A::X, Vec3A::Y, Vec3A::Z]);
         let mesh = base_mesh_to_triangle(mesh, triangle.vertices);
         print_mesh(&mesh);
-        panic!();
+        let x = FRAC_PI_4.sin();
+        assert_eq!(
+            get_vertices(&mesh),
+            &[
+                [0., 1., 0.],
+                [x, x, 0.],
+                [1., 0., 0.,],
+                [0., x, x],
+                [x, 0., x],
+                [0., 0., 1.],
+            ]
+        );
     }
 }
