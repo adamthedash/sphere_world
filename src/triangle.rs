@@ -6,11 +6,9 @@ use bevy::{
     prelude::*,
 };
 use itertools::Itertools;
+use num::ToPrimitive;
 
-use crate::{
-    bary::{BarycentricSnapped, cartesian_to_barycentric},
-    math::arc_distance,
-};
+use crate::{coordinates::bary_iterative::BaryIterative, math::arc_distance};
 
 #[derive(Debug, Clone, Copy)]
 pub enum TrianglePointCmp {
@@ -79,14 +77,8 @@ impl Triangle {
     }
 
     /// Get the bary corredinate of this point if it lies within the triangle
-    pub fn cmp_point_bary(&self, point: Vec3A, subdivisions: u32) -> Option<BarycentricSnapped> {
-        let bary = cartesian_to_barycentric(self.vertices, point);
-        if bary.length < 0. {
-            // Other side of world
-            return None;
-        }
-
-        bary.snap_even(subdivisions)
+    pub fn cmp_point_bary(&self, point: Vec3A, subdivisions: u32) -> Option<BaryIterative> {
+        BaryIterative::from_cartesian(self.vertices, point, subdivisions)
     }
 
     pub fn cmp_point(&self, point: Vec3A, subdivisions: u32) -> TrianglePointCmp {
@@ -94,22 +86,16 @@ impl Triangle {
             return TrianglePointCmp::Outside;
         };
 
-        if let Some(i) = bary
-            .distances
-            .to_array()
-            .iter()
-            .position(|n| *n == bary.denominator)
-        {
-            // Corner oposite this edge
-            return TrianglePointCmp::Corner((i + 2) % 3);
+        if let Some(i) = bary.corner() {
+            return TrianglePointCmp::Corner(i);
         }
 
-        if let Some(i) = bary.distances.to_array().iter().position(|n| *n == 0) {
-            let i0 = i;
-            let i1 = (i + 1) % 3;
-            // Along this edge
-            let t = bary.distances[(i + 2) % 3] as f32 / bary.denominator as f32;
-            return TrianglePointCmp::Edge { v0: i0, v1: i1, t };
+        if let Some((v0, v1, weight)) = bary.edge() {
+            return TrianglePointCmp::Edge {
+                v0,
+                v1,
+                t: weight.to_f32().unwrap(),
+            };
         }
 
         // Inside
@@ -129,6 +115,9 @@ impl Triangle {
             };
             cmp_counts[i] += 1;
         }
+        info!("self {:?}", self.vertices);
+        info!("other {:?}", other.vertices);
+        info!("cmp: {:?}", cmp_counts);
 
         match cmp_counts {
             // [O C E I]
@@ -223,5 +212,68 @@ impl Triangle {
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
         .with_computed_normals()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{assert_matches, f32::consts::GOLDEN_RATIO};
+
+    use glam::Vec3A;
+
+    use crate::{
+        coordinates::bary_iterative::BaryIterative,
+        triangle::{Triangle, TrianglePointCmp},
+    };
+
+    #[test]
+    fn test_cmp_point() {
+        let triangle = Triangle::new(
+            [
+                Vec3A::new(0., 1., GOLDEN_RATIO),
+                Vec3A::new(1., GOLDEN_RATIO, 0.),
+                Vec3A::new(GOLDEN_RATIO, 0., 1.),
+            ]
+            .map(|v| v.normalize()),
+        );
+
+        // Corner
+        let point = triangle.vertices[0];
+        let cmp = triangle.cmp_point_bary(point, 2).unwrap();
+        assert_eq!(cmp, BaryIterative::new([4, 0, 0].into(), cmp.length));
+
+        // Edge midpoint
+        let point = triangle.edge_midpoints[0];
+        let cmp = triangle.cmp_point_bary(point, 2).unwrap();
+        assert_eq!(cmp, BaryIterative::new([2, 2, 0].into(), cmp.length));
+    }
+
+    #[test]
+    fn test_cmp_triangle() {
+        // Edge case - Should be O O C, got E O C
+        let triangle0 = Triangle::new([
+            Vec3A::new(-0.2763932, -0.4472136, 0.8506508),
+            Vec3A::new(-0.68819094, -0.52573115, 0.5),
+            Vec3A::new(-0.16245984, -0.8506508, 0.49999997), // shared
+        ]);
+        let triangle1 = Triangle::new([
+            Vec3A::new(0.0, -1.0, 0.0),
+            Vec3A::new(-0.16245984, -0.8506508, 0.49999997), // shared
+            Vec3A::new(-0.5257311, -0.8506508, 0.0),
+        ]);
+
+        let cmp = triangle0.cmp_triangle(&triangle1, 1);
+        // assert_matches!(cmp, TriangleTriangleCmp::Unrelated, "{cmp:?}");
+
+        let cmps = triangle0.vertices.map(|v| triangle1.cmp_point(v, 1));
+        assert_matches!(
+            cmps,
+            [
+                TrianglePointCmp::Outside,
+                TrianglePointCmp::Outside,
+                TrianglePointCmp::Corner(_)
+            ],
+            "{cmp:?}"
+        );
     }
 }

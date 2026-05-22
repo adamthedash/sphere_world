@@ -4,7 +4,7 @@ use bevy::prelude::*;
 // Trig & maths
 // ========================================================
 
-const EPS: f32 = 1e-3;
+pub const EPS: f32 = 1e-5;
 
 /// https://en.wikipedia.org/wiki/Triple_product#Properties
 fn coplanar(v0: Vec3A, v1: Vec3A, point: Vec3A) -> bool {

@@ -5,19 +5,12 @@ use bevy::{
 };
 use num::ToPrimitive;
 
-use crate::bary::BarycentricSnapped;
+use crate::coordinates::bary_iterative::BaryIterative;
 
+/// Number of times a triangle mesh is subdivided
 pub const MESH_SUBDIVISIONS: u32 = 1;
-
-/// Index into the mesh vertices
-pub fn bary_to_index(bary: BarycentricSnapped) -> u32 {
-    let [x, y, z] = bary.distances.to_array();
-    assert!(x + y + z == bary.denominator, "{:?}", bary);
-
-    let a = bary.denominator + 1;
-    let offset = ((2 * a + 1 - z) * z) / 2;
-    offset + x
-}
+/// Number of triangles along one edge of the mesh
+pub const MESH_STEPS: u32 = 1 << MESH_SUBDIVISIONS;
 
 pub fn create_bary_mesh(subdivisions: u32) -> Mesh {
     const ODD_OFFSETS: [UVec3; 3] = [UVec3::X, UVec3::Y, UVec3::Z];
@@ -39,9 +32,8 @@ pub fn create_bary_mesh(subdivisions: u32) -> Mesh {
             let z = n_odd - x - y - 1;
             let base = UVec3::new(x, y, z);
 
-            let vertex_indices = ODD_OFFSETS
-                .map(|o| BarycentricSnapped::new(base + o, 1.))
-                .map(bary_to_index);
+            let vertex_indices =
+                ODD_OFFSETS.map(|o| BaryIterative::new(base + o, 1.).to_mesh_index());
 
             indices.extend(vertex_indices);
         }
@@ -54,9 +46,8 @@ pub fn create_bary_mesh(subdivisions: u32) -> Mesh {
             let z = n_even - x - y - 1;
             let base = UVec3::new(x, y, z);
 
-            let vertex_indices = EVEN_OFFSETS
-                .map(|o| BarycentricSnapped::new(base + o, 1.))
-                .map(bary_to_index);
+            let vertex_indices =
+                EVEN_OFFSETS.map(|o| BaryIterative::new(base + o, 1.).to_mesh_index());
 
             indices.extend(vertex_indices);
         }
@@ -69,11 +60,10 @@ pub fn create_bary_mesh(subdivisions: u32) -> Mesh {
         for y in 0..(n + 1 - x) {
             let z = n - x - y;
 
-            let bary = BarycentricSnapped::new(UVec3::new(x, y, z), 1.);
+            let bary = BaryIterative::new(UVec3::new(x, y, z), 1.);
             let vertex = Vec3A::from_array(bary.as_ratios().map(|r| r.to_f32().unwrap()));
-            let index = bary_to_index(bary);
+            let index = bary.to_mesh_index();
             vertices[index as usize] = vertex;
-            // vertices.push(vertex);
         }
     }
 
@@ -95,15 +85,10 @@ pub fn base_mesh_to_triangle(mut mesh: Mesh, triangle: [Vec3A; 3]) -> Mesh {
         unreachable!("Bad vertex type");
     };
 
-    // Sphereical interpolation with 3 bary weights
+    // Walk over bary and convert to cartesian
     for p in positions {
-        let [x, y, z] = p;
-
-        let t_v0_v1 = if *z > 0. { *z / (*z + *y) } else { 0. };
-
-        *p = triangle[0]
-            .slerp(triangle[1], t_v0_v1)
-            .slerp(triangle[2], *x)
+        *p = BaryIterative::from_float_weights(*p, 1., MESH_SUBDIVISIONS)
+            .to_cartesian(triangle)
             .to_array();
     }
 
@@ -114,7 +99,6 @@ pub fn base_mesh_to_triangle(mut mesh: Mesh, triangle: [Vec3A; 3]) -> Mesh {
 mod tests {
     use bevy::mesh::{Mesh, VertexAttributeValues};
     use glam::Vec3A;
-    use itertools::Itertools;
 
     use crate::{
         mesh::{base_mesh_to_triangle, create_bary_mesh},
@@ -148,7 +132,6 @@ mod tests {
         let triangle = Triangle::new([Vec3A::X, Vec3A::Y, Vec3A::Z]);
         let mesh = base_mesh_to_triangle(mesh, triangle.vertices);
         print_mesh(&mesh);
-
-        panic!()
+        panic!();
     }
 }

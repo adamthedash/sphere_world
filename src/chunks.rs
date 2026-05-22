@@ -10,15 +10,17 @@ use bevy::{
 use glam::{Vec2, Vec3A};
 use hexasphere::shapes::IcoSphere;
 use itertools::Itertools;
-use num::{Integer, rational::Ratio, traits::Euclid};
+use num::{Integer, ToPrimitive, rational::Ratio};
 use rand::{SeedableRng, seq::IteratorRandom};
 
 use crate::{
     assets::AssetHandles,
     math::arc_distance,
-    mesh::{MESH_SUBDIVISIONS, bary_to_index, base_mesh_to_triangle, create_bary_mesh},
-    triangle::{Triangle, TrianglePointCmp, TriangleTriangleCmp},
+    mesh::{MESH_STEPS, MESH_SUBDIVISIONS, base_mesh_to_triangle, create_bary_mesh},
+    triangle::{Triangle, TriangleTriangleCmp},
 };
+
+const DEBUG_ENTITY: u32 = 409;
 
 // ========================================================
 // ECS bits
@@ -127,6 +129,10 @@ fn calc_adjacent_chunks(
         let (triangle, level, children, _) = relationships.get(candidate).unwrap();
 
         let cmp = test_triangle.cmp_triangle(triangle, test_level.0.max(level.0) as u32);
+
+        if event.entity.index_u32() == DEBUG_ENTITY {
+            info!("{:?} cmp {:?}: {:?}", event.entity, candidate, cmp);
+        }
 
         match cmp {
             TriangleTriangleCmp::Ancestor => {
@@ -391,7 +397,6 @@ fn adjust_mesh_height(
     // Traverse in breadth-first manner
     while let Some(entity) = queue.pop_front() {
         let (triangle, level, children, _, visible) = chunks.get(entity)?;
-
         if matches!(visible, Visibility::Hidden) {
             // This one is disabled, so it doesn't need adjusting. Adjust children instead
             if let Some(children) = children {
@@ -404,16 +409,28 @@ fn adjust_mesh_height(
         // Get list of active adjacent chunks
         let siblings = iter_adjacent(entity, visibility, adj_ups);
 
+        if entity.index_u32() == DEBUG_ENTITY {
+            info!("siblings {entity} -> {siblings:?}");
+        }
+
         // Iterate over edges of this mesh and adjust it down to where the adjacent mesh is
         let mut mesh_overrides = vec![];
         for edge in triangle.edges {
             for sibling in siblings.clone() {
                 let (sibling_triangle, sibling_level, _, _, _) = chunks.get(sibling)?;
-                let e0_bary = sibling_triangle.cmp_point_bary(edge.0, MESH_SUBDIVISIONS);
-                let e1_bary = sibling_triangle.cmp_point_bary(edge.1, MESH_SUBDIVISIONS);
+                let subdivision_ratio = (level.0 - sibling_level.0) as u32;
+                let mesh_steps_ratio = 2_u32.pow(subdivision_ratio);
 
-                if let Some(e0_bary) = e0_bary
-                    && let Some(e1_bary) = e1_bary
+                // Find out where along the sibling this edge lies, if any
+                // Note we sample on a higher resolution as our corners may lie between mesh
+                // vertices on the sibling
+                let sib_e0_bary =
+                    sibling_triangle.cmp_point_bary(edge.0, MESH_SUBDIVISIONS + subdivision_ratio);
+                let sib_e1_bary =
+                    sibling_triangle.cmp_point_bary(edge.1, MESH_SUBDIVISIONS + subdivision_ratio);
+
+                if let Some(sib_e0_bary) = sib_e0_bary
+                    && let Some(sib_e1_bary) = sib_e1_bary
                 {
                     // Get bary coords for own edge corners
                     let self_e0_bary = triangle
@@ -423,16 +440,15 @@ fn adjust_mesh_height(
                         .cmp_point_bary(edge.1, MESH_SUBDIVISIONS)
                         .expect("Own edge should always have a bary");
 
-                    if entity.index_u32() == 408 {
-                        info!("Edge for {:?} interecting {:?}", entity, sibling);
-                        info!("e0 {:.2?} -> sibling b0 {:?}", edge.0, e0_bary);
-                        info!("e1 {:.2?} -> sibling b1 {:?}", edge.1, e1_bary);
-                        info!("e0 {:.2?} -> self b0 {:?}", edge.0, self_e0_bary);
-                        info!("e1 {:.2?} -> self b1 {:?}", edge.1, self_e1_bary);
+                    if entity.index_u32() == DEBUG_ENTITY {
+                        println!();
+                        info!("edge of {entity} on {sibling} | ratio {mesh_steps_ratio}:1");
+                        info!("e0 -> self {self_e0_bary} | sibling {sib_e0_bary}");
+                        info!("e1 -> self {self_e1_bary} | sibling {sib_e1_bary}");
                     }
 
                     // Get sibling mesh
-                    let mesh = base_mesh_handles.get(entity).expect("mesh");
+                    let mesh = base_mesh_handles.get(sibling).expect("mesh");
                     let mesh = meshes
                         .get(mesh.0.id())
                         .expect("Have a handle, so mesh should exist");
@@ -444,52 +460,132 @@ fn adjust_mesh_height(
                         panic!("Unexpected data type");
                     };
 
-                    let level_ratio = 2_u32.pow((level.0 - sibling_level.0) as u32);
+                    // We'll need to round "down" away from the starting edge and "up" away from the
+                    // ending edge when figuring out where the nearest edges are in the sibling mesh
+                    // Since we're a power of 2 smaller than our sibling, we can walk along the edge
+                    // by our own size until we've hit a real vertex
+                    //
+                    // sib  1---------------2
+                    // self     0-1-2           3:1 subdivisions, 8:1 size
+                    //      |---|---|---|---|
+                    //      |1x-|   |--2x---|
+                    // sibi     1 1 1
+                    // sibr     2 3 4
+
+                    let diff = sib_e1_bary - sib_e0_bary;
+                    if entity.index_u32() == DEBUG_ENTITY {
+                        info!("diff: {:?}", diff);
+                    }
+
+                    let e0_sibling_extensions = (0..mesh_steps_ratio)
+                        .find(|n| {
+                            sib_e0_bary
+                                .checked_add(-diff * *n as i32)
+                                .and_then(|b| b.downsample(subdivision_ratio))
+                                .is_some()
+                        })
+                        .expect("Failed to extend e0 to sibling vertex");
+                    let e0_bary_ext = sib_e0_bary
+                        .checked_add(-diff * e0_sibling_extensions as i32)
+                        .expect("Extension found above");
+
+                    let e1_sibling_extensions = (0..mesh_steps_ratio)
+                        .find(|n| {
+                            sib_e1_bary
+                                .checked_add(diff * *n as i32)
+                                .and_then(|b| b.downsample(subdivision_ratio))
+                                .is_some()
+                        })
+                        .expect("Failed to extend e1 to sibling vertex");
+                    let e1_bary_ext = sib_e1_bary
+                        .checked_add(diff * e1_sibling_extensions as i32)
+                        .expect("Extension found above");
+
+                    let bot = (1 + e0_sibling_extensions + e1_sibling_extensions) * MESH_STEPS;
+
+                    if entity.index_u32() == DEBUG_ENTITY {
+                        info!(
+                            "extended e0 {}  -> {} ({}) by {} steps",
+                            sib_e0_bary,
+                            e0_bary_ext,
+                            e0_bary_ext
+                                .downsample(subdivision_ratio)
+                                .unwrap_or_else(|| panic!(
+                                    "bad downsample: {}, {}",
+                                    e0_bary_ext, subdivision_ratio
+                                )),
+                            e0_sibling_extensions,
+                        );
+                        info!(
+                            "extended e1 {}  -> {} ({}) by {} steps",
+                            sib_e1_bary,
+                            e1_bary_ext,
+                            e1_bary_ext.downsample(subdivision_ratio).unwrap(),
+                            e1_sibling_extensions,
+                        );
+                    }
 
                     // Walk along edge of this triangle and sample from adjacent
-                    let mesh_steps = 2_u32.pow(MESH_SUBDIVISIONS);
-                    for i in 0..=mesh_steps {
-                        let self_bary =
-                            self_e0_bary.interp(&self_e1_bary, Ratio::new(i, mesh_steps));
-                        let self_index = bary_to_index(self_bary);
+                    for i in 0..=MESH_STEPS {
+                        let self_bary = self_e0_bary.lerp(&self_e1_bary, Ratio::new(i, MESH_STEPS));
+                        let self_index = self_bary.to_mesh_index();
 
-                        let (d, r) = i.div_rem(&level_ratio);
+                        let i_adj = i + e0_sibling_extensions * MESH_STEPS;
+                        let (d, r) = i_adj.div_rem(&mesh_steps_ratio);
 
                         let vertex = if r == 0 {
-                            // Take corner directly
-                            let bary = e0_bary.interp(&e1_bary, Ratio::new(i, mesh_steps));
-                            debug!("sampling @ {:?}", bary.distances);
+                            // Take vertex directly
+                            let top = d * mesh_steps_ratio;
+                            let sib_bary = e0_bary_ext
+                                .lerp(&e1_bary_ext, Ratio::new(top, bot))
+                                .downsample(subdivision_ratio)
+                                .unwrap();
 
-                            let index = bary_to_index(bary);
-                            if entity.index_u32() == 408 {
-                                info!("sibling index {:?} -> self index {:?}", index, self_index);
+                            let index = sib_bary.to_mesh_index();
+
+                            if entity.index_u32() == DEBUG_ENTITY {
+                                info!(
+                                    "i {i} / {MESH_STEPS} -> self {self_bary} (idx {self_index}) | sib {sib_bary} (idx {index})"
+                                );
                             }
 
                             positions[index as usize]
                         } else {
                             // Interp between d & d+1 by r / ratio
-                            let bary0 =
-                                e0_bary.interp(&e1_bary, Ratio::new(d * level_ratio, mesh_steps));
-                            let bary1 = e0_bary
-                                .interp(&e1_bary, Ratio::new((d + 1) * level_ratio, mesh_steps));
-                            debug!(
-                                "interpolating {:?} - {:?} @ {}/{}",
-                                bary0.distances, bary1.distances, r, level_ratio
-                            );
 
-                            let index0 = bary_to_index(bary0);
-                            let index1 = bary_to_index(bary1);
-                            if entity.index_u32() == 408 {
+                            let top0 = d * mesh_steps_ratio;
+                            let top1 = (d + 1) * mesh_steps_ratio;
+
+                            let sib_bary0 = e0_bary_ext.lerp(&e1_bary_ext, Ratio::new(top0, bot));
+                            let sib_bary0 =
+                                sib_bary0.downsample(subdivision_ratio).unwrap_or_else(|| {
+                                    panic!(
+                                        "Failed to downsample sib_bary0 {} by {} | {entity} -> {sibling}",
+                                        sib_bary0, subdivision_ratio
+                                    )
+                                });
+
+                            let sib_bary1 = e0_bary_ext
+                                .lerp(&e1_bary_ext, Ratio::new(top1, bot))
+                                .downsample(subdivision_ratio)
+                                .unwrap();
+
+                            let index0 = sib_bary0.to_mesh_index();
+                            let index1 = sib_bary1.to_mesh_index();
+
+                            if entity.index_u32() == DEBUG_ENTITY {
                                 info!(
-                                    "sibling indexes {:?} + {:?} -> self index {:?}",
-                                    index0, index1, self_index
+                                    "i {i} / {MESH_STEPS} -> self {self_bary} (idx {self_index}) | sib {sib_bary0} --{r}/{mesh_steps_ratio}-> {sib_bary1} | idx {index0}--{r}/{mesh_steps_ratio}->{index1}"
                                 );
                             }
 
                             let vertex0 = positions[index0 as usize];
                             let vertex1 = positions[index1 as usize];
                             Vec3A::from_array(vertex0)
-                                .lerp(Vec3A::from_array(vertex1), r as f32 / mesh_steps as f32)
+                                .lerp(
+                                    Vec3A::from_array(vertex1),
+                                    r as f32 / mesh_steps_ratio as f32,
+                                )
                                 .to_array()
                         };
 
@@ -501,7 +597,122 @@ fn adjust_mesh_height(
             }
         }
 
-        if !mesh_overrides.is_empty() && entity.index_u32() == 408 {
+        // Secondary check to cover corner-edge adjacencies
+        for vertex in triangle.vertices {
+            for sibling in siblings.clone() {
+                let (sibling_triangle, sibling_level, _, _, _) = chunks.get(sibling)?;
+                let subdivision_ratio = (level.0 - sibling_level.0) as u32;
+                let mesh_steps_ratio = 2_u32.pow(subdivision_ratio);
+
+                // Find out where along the sibling this vertex lies, if any
+                // Note we sample on a higher resolution as our corners may lie between mesh
+                // vertices on the sibling
+                let v_bary =
+                    sibling_triangle.cmp_point_bary(vertex, MESH_SUBDIVISIONS + subdivision_ratio);
+
+                if let Some(v_bary) = v_bary {
+                    // Get bary coords for own vertex
+                    let self_v_bary = triangle
+                        .cmp_point_bary(vertex, MESH_SUBDIVISIONS)
+                        .expect("Own edge should always have a bary");
+
+                    // Get sibling mesh
+                    let mesh = base_mesh_handles.get(sibling).expect("mesh");
+                    let mesh = meshes
+                        .get(mesh.0.id())
+                        .expect("Have a handle, so mesh should exist");
+
+                    let positions = mesh
+                        .attribute(Mesh::ATTRIBUTE_POSITION)
+                        .expect("Mesh should always have positions");
+                    let VertexAttributeValues::Float32x3(positions) = positions else {
+                        panic!("Unexpected data type");
+                    };
+
+                    if let Some(sib_bary) = v_bary.downsample(subdivision_ratio) {
+                        // Vertex lies on a sibling mesh vertex
+                        let self_index = self_v_bary.to_mesh_index();
+                        let sib_index = sib_bary.to_mesh_index();
+                        mesh_overrides.push((self_index, positions[sib_index as usize]));
+                    } else {
+                        // Vertex lies between two sibling mesh vertices
+                        // Find the 2 nearest points on the sibling edge
+                        // Find a sibling corner to use as a direction vector
+                        let [i0, i1] = v_bary
+                            .weights
+                            .to_array()
+                            .iter()
+                            .positions(|d| *d > 0)
+                            .collect_array::<2>()
+                            .expect("Along edge, so must have 2 non-zero bary coords");
+
+                        let mut diff = [0; 3];
+                        diff[i0] = -1;
+                        diff[i1] = 1;
+                        let diff = IVec3::from_array(diff);
+
+                        // Walk along edge until we get valid sibling vertices
+                        let i0_ext_steps = (0..mesh_steps_ratio)
+                            .find(|n| {
+                                v_bary
+                                    .checked_add(-diff * *n as i32)
+                                    .and_then(|b| b.downsample(subdivision_ratio))
+                                    .is_some()
+                            })
+                            .unwrap();
+
+                        let i1_ext_steps = (0..mesh_steps_ratio)
+                            .find(|n| {
+                                v_bary
+                                    .checked_add(diff * *n as i32)
+                                    .and_then(|b| b.downsample(subdivision_ratio))
+                                    .is_some()
+                            })
+                            .unwrap();
+                        let i0_ext = v_bary
+                            .checked_add(-diff * i0_ext_steps as i32)
+                            .and_then(|b| b.downsample(subdivision_ratio))
+                            .unwrap();
+                        let i1_ext = v_bary
+                            .checked_add(diff * i1_ext_steps as i32)
+                            .and_then(|b| b.downsample(subdivision_ratio))
+                            .unwrap();
+
+                        if entity.index_u32() == DEBUG_ENTITY {
+                            info!("diff {:?}", diff);
+                            info!(
+                                "extended v {}  -> {} by {} steps",
+                                v_bary,
+                                i0_ext,
+                                // i0_ext.downsample(subdivision_ratio).unwrap(),
+                                i0_ext_steps,
+                            );
+                            info!(
+                                "extended v {}  -> {} by {} steps",
+                                v_bary,
+                                i1_ext,
+                                // i1_ext.downsample(subdivision_ratio).unwrap(),
+                                i1_ext_steps,
+                            );
+                        }
+
+                        let t = Ratio::new(i0_ext_steps, mesh_steps_ratio);
+
+                        let index0 = i0_ext.to_mesh_index();
+                        let index1 = i1_ext.to_mesh_index();
+                        let self_index = self_v_bary.to_mesh_index();
+
+                        let vertex0 = Vec3A::from_array(positions[index0 as usize]);
+                        let vertex1 = Vec3A::from_array(positions[index1 as usize]);
+                        let new_vertex = vertex0.lerp(vertex1, t.to_f32().unwrap());
+
+                        mesh_overrides.push((self_index, new_vertex.to_array()));
+                    }
+                }
+            }
+        }
+
+        if !mesh_overrides.is_empty() && entity.index_u32() == DEBUG_ENTITY {
             info!("overrides: {:.2?}\n", mesh_overrides);
         }
 
@@ -524,6 +735,10 @@ fn adjust_mesh_height(
 
         // Apply overrides
         for (i, v) in mesh_overrides {
+            // info!(
+            //     "overriding {i} {:.2?} -> {:.2?}",
+            //     base_vertices[i as usize], v
+            // );
             base_vertices[i as usize] = v;
         }
 
@@ -596,6 +811,7 @@ fn subdivide_smallest_chunks(
 
 // Debug - show at all times
 const LOD_BORDERS: [f32; 5] = [PI; _];
+
 const MAX_LOD_LEVEL: usize = LOD_BORDERS.len() + 1;
 
 fn subdivide_close_chunks(
@@ -681,7 +897,14 @@ fn toggle_lods(
     Ok(())
 }
 
-fn draw_gizmos(mut gizmos: Gizmos, chunks: Query<(Entity, &AccTriangle, &Visibility)>) {
+#[derive(Resource, PartialEq)]
+pub struct DrawGizmos(bool);
+
+fn draw_gizmos(
+    mut gizmos: Gizmos,
+    chunks: Query<(Entity, &Triangle, &Visibility, &BaseMesh)>,
+    meshes: Res<Assets<Mesh>>,
+) {
     const RED: Color = Color::srgb(1., 0., 0.);
     const GREEN: Color = Color::srgb(0., 1., 0.);
     const BLUE: Color = Color::srgb(0., 0., 1.);
@@ -706,13 +929,12 @@ fn draw_gizmos(mut gizmos: Gizmos, chunks: Query<(Entity, &AccTriangle, &Visibil
     }
 
     // Triangle faces
-    for (entity, triangle, visibility) in chunks {
+    for (entity, triangle, visibility, base_mesh) in chunks {
         if matches!(visibility, Visibility::Hidden) {
             continue;
         }
 
-        let triangle = triangle.as_triangle();
-        let translation = triangle.centre.normalize() + triangle.normal * 0.1;
+        let centre_translation = triangle.centre.normalize() + triangle.normal * 0.1;
 
         // Local transform matrix
         let forward = triangle.normal.to_vec3();
@@ -723,18 +945,37 @@ fn draw_gizmos(mut gizmos: Gizmos, chunks: Query<(Entity, &AccTriangle, &Visibil
 
         // Local axes
         let scale = triangle.edge_arc_radius();
-        let t = translation.to_vec3();
+        let t = centre_translation.to_vec3();
         gizmos.line(t, t + forward * scale * 0.2, GREEN);
         gizmos.line(t, t + right * scale * 0.2, RED);
         gizmos.line(t, t + up * scale * 0.2, BLUE);
 
+        // Entitity ID
         gizmos.text(
-            Isometry3d::new(translation.to_vec3(), rotation),
+            Isometry3d::new(centre_translation.to_vec3(), rotation),
             &format!("{entity:?}"),
             0.15 * scale,
             Vec2::ZERO,
             MAGENTA,
         );
+
+        // Mesh vertex IDs
+        let mesh = meshes.get(base_mesh.0.id()).unwrap();
+        let positions = mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap();
+        let VertexAttributeValues::Float32x3(positions) = positions else {
+            unreachable!()
+        };
+        for (i, pos) in positions.iter().enumerate() {
+            let translation = Vec3A::from_array(*pos).slerp(centre_translation, 0.1);
+
+            gizmos.text(
+                Isometry3d::new(translation.to_vec3(), rotation),
+                &format!("{i:?}"),
+                0.1 * scale,
+                Vec2::ZERO,
+                MAGENTA,
+            );
+        }
     }
 }
 
@@ -783,7 +1024,7 @@ impl Plugin for ChunkPlugin {
                 ((
                     // subdivide_close_chunks, //
                     toggle_lods,
-                    adjust_mesh_height,
+                    // adjust_mesh_height,
                 )
                     .chain(),),
             )
@@ -792,7 +1033,17 @@ impl Plugin for ChunkPlugin {
             // Rotating moon
             .add_systems(Startup, init_player)
             .add_systems(Update, move_player)
-            .add_systems(Update, draw_gizmos);
+            // Debug stuff
+            .insert_resource(DrawGizmos(false))
+            .add_systems(
+                Update,
+                { |mut g: ResMut<DrawGizmos>| g.0 ^= true }
+                    .run_if(input_just_pressed(KeyCode::KeyG)),
+            )
+            .add_systems(
+                Update,
+                draw_gizmos.run_if(resource_equals(DrawGizmos(true))),
+            );
     }
 }
 
@@ -806,8 +1057,9 @@ mod tests {
     use glam::Vec3A;
 
     use crate::{
-        chunks::{Triangle, TrianglePointCmp, arc_distance},
+        chunks::arc_distance,
         math::almost_equal,
+        triangle::{Triangle, TrianglePointCmp},
     };
 
     #[test]
@@ -844,16 +1096,22 @@ mod tests {
     #[test]
     fn test_cmp_edge_cases() {
         // case failed due to precision loss during projection to triangle axes
-        let triangle0 = Triangle::new([
-            Vec3A::new(0.32211334, 0.39611205, 0.85984784), // shared
-            Vec3A::new(0.38071868, 0.41345215, 0.82710975),
-            Vec3A::new(0.3353182, 0.46525362, 0.81920743), // shared
-        ]);
-        let triangle1 = Triangle::new([
-            Vec3A::new(0.2763932, 0.4472136, 0.8506508),
-            Vec3A::new(0.32211334, 0.39611205, 0.85984784), // shared
-            Vec3A::new(0.3353182, 0.46525362, 0.81920743),  // shared
-        ]);
+        let triangle0 = Triangle::new(
+            [
+                Vec3A::new(0.32211334, 0.39611205, 0.85984784), // shared
+                Vec3A::new(0.38071868, 0.41345215, 0.82710975),
+                Vec3A::new(0.3353182, 0.46525362, 0.81920743), // shared
+            ]
+            .map(|v| v.normalize()),
+        );
+        let triangle1 = Triangle::new(
+            [
+                Vec3A::new(0.2763932, 0.4472136, 0.8506508),
+                Vec3A::new(0.32211334, 0.39611205, 0.85984784), // shared
+                Vec3A::new(0.3353182, 0.46525362, 0.81920743),  // shared
+            ]
+            .map(|v| v.normalize()),
+        );
 
         let t0_t1 = triangle0.vertices.map(|v| triangle1.cmp_point(v, 4));
         let t1_t0 = triangle1.vertices.map(|v| triangle0.cmp_point(v, 4));
@@ -875,16 +1133,22 @@ mod tests {
         );
 
         // Case failes as triangles share a vertex after being reflexed through origin
-        let triangle0 = Triangle::new([
-            Vec3A::new(0.28, 0.45, 0.85),
-            Vec3A::new(0.59, 0.00, 0.81),
-            Vec3A::new(0.69, 0.53, 0.50),
-        ]);
-        let triangle1 = Triangle::new([
-            Vec3A::new(-0.72, 0.45, -0.53),
-            Vec3A::new(-0.28, -0.45, -0.85),
-            Vec3A::new(-0.89, -0.45, 0.00),
-        ]);
+        let triangle0 = Triangle::new(
+            [
+                Vec3A::new(0.28, 0.45, 0.85),
+                Vec3A::new(0.59, 0.00, 0.81),
+                Vec3A::new(0.69, 0.53, 0.50),
+            ]
+            .map(|v| v.normalize()),
+        );
+        let triangle1 = Triangle::new(
+            [
+                Vec3A::new(-0.72, 0.45, -0.53),
+                Vec3A::new(-0.28, -0.45, -0.85),
+                Vec3A::new(-0.89, -0.45, 0.00),
+            ]
+            .map(|v| v.normalize()),
+        );
         let t0_t1 = triangle0.vertices.map(|v| triangle1.cmp_point(v, 4));
         let t1_t0 = triangle1.vertices.map(|v| triangle0.cmp_point(v, 4));
         assert_matches!(
@@ -906,16 +1170,22 @@ mod tests {
         println!("=======================================");
 
         // Fails as point is NaN when transformed to bary coords
-        let triangle0 = Triangle::new([
-            Vec3A::new(0.7236068, -0.4472136, 0.5257311),
-            Vec3A::new(0.9510565, 0.0, 0.30901697), // failing
-            Vec3A::new(0.58778524, 0.0, 0.809017),
-        ]);
-        let triangle1 = Triangle::new([
-            Vec3A::new(0.2763932, 0.4472136, -0.8506508),
-            Vec3A::new(0.7236068, -0.4472136, -0.5257311),
-            Vec3A::new(-0.2763932, -0.4472136, -0.8506508),
-        ]);
+        let triangle0 = Triangle::new(
+            [
+                Vec3A::new(0.7236068, -0.4472136, 0.5257311),
+                Vec3A::new(0.9510565, 0.0, 0.30901697), // failing
+                Vec3A::new(0.58778524, 0.0, 0.809017),
+            ]
+            .map(|v| v.normalize()),
+        );
+        let triangle1 = Triangle::new(
+            [
+                Vec3A::new(0.2763932, 0.4472136, -0.8506508),
+                Vec3A::new(0.7236068, -0.4472136, -0.5257311),
+                Vec3A::new(-0.2763932, -0.4472136, -0.8506508),
+            ]
+            .map(|v| v.normalize()),
+        );
 
         let t0_t1 = triangle0.vertices.map(|v| triangle1.cmp_point(v, 4));
         let t1_t0 = triangle1.vertices.map(|v| triangle0.cmp_point(v, 4));
