@@ -20,7 +20,7 @@ use crate::{
     triangle::{Triangle, TriangleTriangleCmp},
 };
 
-const DEBUG_ENTITY: u32 = 409;
+const DEBUG_ENTITY: u32 = 424;
 
 // ========================================================
 // ECS bits
@@ -414,6 +414,8 @@ fn adjust_mesh_height(
         }
 
         // Iterate over edges of this mesh and adjust it down to where the adjacent mesh is
+        // TODO: Re-do how this is done. It'll be simpler to iterate around the perimiter of the
+        // mesh, then cmp each one against siblings.
         let mut mesh_overrides = vec![];
         for edge in triangle.edges {
             for sibling in siblings.clone() {
@@ -610,6 +612,10 @@ fn adjust_mesh_height(
                 let v_bary =
                     sibling_triangle.cmp_point_bary(vertex, MESH_SUBDIVISIONS + subdivision_ratio);
 
+                if entity.index_u32() == DEBUG_ENTITY {
+                    info!("2nd {entity:?} -> {sibling:?} - {:?}", v_bary);
+                }
+
                 if let Some(v_bary) = v_bary {
                     // Get bary coords for own vertex
                     let self_v_bary = triangle
@@ -707,6 +713,8 @@ fn adjust_mesh_height(
                         let new_vertex = vertex0.lerp(vertex1, t.to_f32().unwrap());
 
                         mesh_overrides.push((self_index, new_vertex.to_array()));
+
+                        break;
                     }
                 }
             }
