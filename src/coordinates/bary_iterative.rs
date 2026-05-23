@@ -58,7 +58,7 @@ impl BaryIterative {
     pub fn from_cartesian(
         triangle: [Vec3A; 3],
         point: Vec3A,
-        max_subidivisions: u32,
+        max_subdivisions: u32,
     ) -> Option<Self> {
         for v in triangle {
             assert!(v.is_normalized(), "Traingle must be geocentric");
@@ -99,8 +99,8 @@ impl BaryIterative {
             let wi1 = top / bot;
 
             // Round to nearest grid point
-            let wi1 = (wi1 * (1 << max_subidivisions) as f32).round() as u32;
-            let wi0 = (1 << max_subidivisions) - wi1;
+            let wi1 = (wi1 * (1 << max_subdivisions) as f32).round() as u32;
+            let wi0 = (1 << max_subdivisions) - wi1;
 
             let mut weights = [0; 3];
             weights[i0] = wi0;
@@ -111,7 +111,7 @@ impl BaryIterative {
 
         let corner_weights = |i: usize| {
             let mut weights = [0; 3];
-            weights[i] = 1 << max_subidivisions;
+            weights[i] = 1 << max_subdivisions;
             weights
         };
 
@@ -119,7 +119,7 @@ impl BaryIterative {
         let weights = match plane_cmps {
             [Pos, Pos, Pos] => {
                 // Inside
-                if max_subidivisions == 0 {
+                if max_subdivisions == 0 {
                     // We've recursed too far, round to the nearest grid point
                     let corner = triangle
                         .iter()
@@ -166,7 +166,7 @@ impl BaryIterative {
                         .zip(new_relative_u32)
                         .flat_map(|(t, r)| {
                             let bary =
-                                BaryIterative::from_cartesian(t, point, max_subidivisions - 1);
+                                BaryIterative::from_cartesian(t, point, max_subdivisions - 1);
                             bary.map(|b| (b.weights, r))
                         })
                         .next()
@@ -206,7 +206,7 @@ impl BaryIterative {
 
         Some(Self {
             weights: weights.into(),
-            denominator: 1 << max_subidivisions,
+            denominator: 1 << max_subdivisions,
             length,
         })
     }
@@ -363,6 +363,23 @@ impl BaryIterative {
         self.weights
             .to_array()
             .map(|n| Ratio::new(n, self.denominator))
+    }
+
+    /// Iterate over all of the points around the perimenter of the triangle grid at this resolution
+    pub fn perimeter(subdivisions: u32) -> impl Iterator<Item = Self> {
+        let n = 1 << subdivisions;
+        (0..3).flat_map(move |i0| {
+            let i1 = (i0 + 1) % 3;
+
+            (0..n).map(move |w0| {
+                let w1 = n - w0;
+                let mut weights = [0; 3];
+                weights[i0] = w0;
+                weights[i1] = w1;
+
+                Self::new(weights.into(), 1.)
+            })
+        })
     }
 }
 
