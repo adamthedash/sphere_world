@@ -115,9 +115,6 @@ impl Triangle {
             };
             cmp_counts[i] += 1;
         }
-        info!("self {:?}", self.vertices);
-        info!("other {:?}", other.vertices);
-        info!("cmp: {:?}", cmp_counts);
 
         match cmp_counts {
             // [O C E I]

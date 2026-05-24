@@ -15,12 +15,13 @@ use rand::{SeedableRng, seq::IteratorRandom};
 
 use crate::{
     assets::AssetHandles,
+    coordinates::bary_iterative::BaryIterative,
     math::arc_distance,
     mesh::{MESH_STEPS, MESH_SUBDIVISIONS, base_mesh_to_triangle, create_bary_mesh},
     triangle::{Triangle, TriangleTriangleCmp},
 };
 
-const DEBUG_ENTITY: u32 = 424;
+const DEBUG_ENTITY: u32 = u32::MAX;
 
 // ========================================================
 // ECS bits
@@ -417,306 +418,89 @@ fn adjust_mesh_height(
         // TODO: Re-do how this is done. It'll be simpler to iterate around the perimiter of the
         // mesh, then cmp each one against siblings.
         let mut mesh_overrides = vec![];
-        for edge in triangle.edges {
+        for bary_self in BaryIterative::perimeter(MESH_SUBDIVISIONS) {
+            let point = bary_self.to_cartesian(triangle.vertices);
+            let self_index = bary_self.to_mesh_index();
+
             for sibling in siblings.clone() {
                 let (sibling_triangle, sibling_level, _, _, _) = chunks.get(sibling)?;
                 let subdivision_ratio = (level.0 - sibling_level.0) as u32;
-                let mesh_steps_ratio = 2_u32.pow(subdivision_ratio);
 
-                // Find out where along the sibling this edge lies, if any
-                // Note we sample on a higher resolution as our corners may lie between mesh
-                // vertices on the sibling
-                let sib_e0_bary =
-                    sibling_triangle.cmp_point_bary(edge.0, MESH_SUBDIVISIONS + subdivision_ratio);
-                let sib_e1_bary =
-                    sibling_triangle.cmp_point_bary(edge.1, MESH_SUBDIVISIONS + subdivision_ratio);
+                // Find out where this point lies in the sibling's coordinate system
+                let Some(sibling_bary) = BaryIterative::from_cartesian(
+                    sibling_triangle.vertices,
+                    point,
+                    MESH_SUBDIVISIONS + subdivision_ratio,
+                ) else {
+                    // Point doesn't lie on this sibling
+                    continue;
+                };
 
-                if let Some(sib_e0_bary) = sib_e0_bary
-                    && let Some(sib_e1_bary) = sib_e1_bary
-                {
-                    // Get bary coords for own edge corners
-                    let self_e0_bary = triangle
-                        .cmp_point_bary(edge.0, MESH_SUBDIVISIONS)
-                        .expect("Own edge should always have a bary");
-                    let self_e1_bary = triangle
-                        .cmp_point_bary(edge.1, MESH_SUBDIVISIONS)
-                        .expect("Own edge should always have a bary");
+                // Get sibling mesh - use non-base mesh as we want to include adjustments for
+                // siblings processed in previous loops of this function
+                let mesh = acc_mesh_handles.get(sibling).expect("mesh");
+                let mesh = meshes
+                    .get(mesh.0.id())
+                    .expect("Have a handle, so mesh should exist");
+                let positions = mesh
+                    .attribute(Mesh::ATTRIBUTE_POSITION)
+                    .expect("Mesh should always have positions");
+                let VertexAttributeValues::Float32x3(positions) = positions else {
+                    panic!("Unexpected data type");
+                };
 
-                    if entity.index_u32() == DEBUG_ENTITY {
-                        println!();
-                        info!("edge of {entity} on {sibling} | ratio {mesh_steps_ratio}:1");
-                        info!("e0 -> self {self_e0_bary} | sibling {sib_e0_bary}");
-                        info!("e1 -> self {self_e1_bary} | sibling {sib_e1_bary}");
+                let nonzero_axes = sibling_bary
+                    .weights
+                    .to_array()
+                    .iter()
+                    .positions(|w| *w > 0)
+                    .collect::<Vec<_>>();
+
+                match *nonzero_axes.as_slice() {
+                    [_i] => {
+                        // Sibling corner, downsample and take point
+                        let sibling_bary = sibling_bary
+                            .downsample(subdivision_ratio)
+                            .expect("Corners should downsample cleanly");
+                        let sibling_index = sibling_bary.to_mesh_index();
+                        mesh_overrides.push((self_index, positions[sibling_index as usize]));
                     }
+                    [i0, i1] => {
+                        // Somewhere along an edge
 
-                    // Get sibling mesh
-                    let mesh = base_mesh_handles.get(sibling).expect("mesh");
-                    let mesh = meshes
-                        .get(mesh.0.id())
-                        .expect("Have a handle, so mesh should exist");
+                        let (d0, r0) = sibling_bary.weights[i0].div_rem(&(1 << subdivision_ratio));
+                        let d1 = d0 + 1;
 
-                    let positions = mesh
-                        .attribute(Mesh::ATTRIBUTE_POSITION)
-                        .expect("Mesh should always have positions");
-                    let VertexAttributeValues::Float32x3(positions) = positions else {
-                        panic!("Unexpected data type");
-                    };
+                        // Construct sibling coordinates for 2 nearest vertices
+                        let mut weights0 = [0; 3];
+                        weights0[i0] = d0;
+                        weights0[i1] =
+                            (sibling_bary.denominator >> subdivision_ratio) - weights0[i0];
+                        let sibling_bary0 = BaryIterative::new(weights0.into(), 1.);
 
-                    // We'll need to round "down" away from the starting edge and "up" away from the
-                    // ending edge when figuring out where the nearest edges are in the sibling mesh
-                    // Since we're a power of 2 smaller than our sibling, we can walk along the edge
-                    // by our own size until we've hit a real vertex
-                    //
-                    // sib  1---------------2
-                    // self     0-1-2           3:1 subdivisions, 8:1 size
-                    //      |---|---|---|---|
-                    //      |1x-|   |--2x---|
-                    // sibi     1 1 1
-                    // sibr     2 3 4
+                        let mut weights1 = [0; 3];
+                        weights1[i0] = d1;
+                        weights1[i1] =
+                            (sibling_bary.denominator >> subdivision_ratio) - weights1[i0];
+                        let sibling_bary1 = BaryIterative::new(weights1.into(), 1.);
 
-                    let diff = sib_e1_bary - sib_e0_bary;
-                    if entity.index_u32() == DEBUG_ENTITY {
-                        info!("diff: {:?}", diff);
-                    }
-
-                    let e0_sibling_extensions = (0..mesh_steps_ratio)
-                        .find(|n| {
-                            sib_e0_bary
-                                .checked_add(-diff * *n as i32)
-                                .and_then(|b| b.downsample(subdivision_ratio))
-                                .is_some()
-                        })
-                        .expect("Failed to extend e0 to sibling vertex");
-                    let e0_bary_ext = sib_e0_bary
-                        .checked_add(-diff * e0_sibling_extensions as i32)
-                        .expect("Extension found above");
-
-                    let e1_sibling_extensions = (0..mesh_steps_ratio)
-                        .find(|n| {
-                            sib_e1_bary
-                                .checked_add(diff * *n as i32)
-                                .and_then(|b| b.downsample(subdivision_ratio))
-                                .is_some()
-                        })
-                        .expect("Failed to extend e1 to sibling vertex");
-                    let e1_bary_ext = sib_e1_bary
-                        .checked_add(diff * e1_sibling_extensions as i32)
-                        .expect("Extension found above");
-
-                    let bot = (1 + e0_sibling_extensions + e1_sibling_extensions) * MESH_STEPS;
-
-                    if entity.index_u32() == DEBUG_ENTITY {
-                        info!(
-                            "extended e0 {}  -> {} ({}) by {} steps",
-                            sib_e0_bary,
-                            e0_bary_ext,
-                            e0_bary_ext
-                                .downsample(subdivision_ratio)
-                                .unwrap_or_else(|| panic!(
-                                    "bad downsample: {}, {}",
-                                    e0_bary_ext, subdivision_ratio
-                                )),
-                            e0_sibling_extensions,
-                        );
-                        info!(
-                            "extended e1 {}  -> {} ({}) by {} steps",
-                            sib_e1_bary,
-                            e1_bary_ext,
-                            e1_bary_ext.downsample(subdivision_ratio).unwrap(),
-                            e1_sibling_extensions,
-                        );
-                    }
-
-                    // Walk along edge of this triangle and sample from adjacent
-                    for i in 0..=MESH_STEPS {
-                        let self_bary = self_e0_bary.lerp(&self_e1_bary, Ratio::new(i, MESH_STEPS));
-                        let self_index = self_bary.to_mesh_index();
-
-                        let i_adj = i + e0_sibling_extensions * MESH_STEPS;
-                        let (d, r) = i_adj.div_rem(&mesh_steps_ratio);
-
-                        let vertex = if r == 0 {
-                            // Take vertex directly
-                            let top = d * mesh_steps_ratio;
-                            let sib_bary = e0_bary_ext
-                                .lerp(&e1_bary_ext, Ratio::new(top, bot))
-                                .downsample(subdivision_ratio)
-                                .unwrap();
-
-                            let index = sib_bary.to_mesh_index();
-
-                            if entity.index_u32() == DEBUG_ENTITY {
-                                info!(
-                                    "i {i} / {MESH_STEPS} -> self {self_bary} (idx {self_index}) | sib {sib_bary} (idx {index})"
-                                );
-                            }
-
-                            positions[index as usize]
-                        } else {
-                            // Interp between d & d+1 by r / ratio
-
-                            let top0 = d * mesh_steps_ratio;
-                            let top1 = (d + 1) * mesh_steps_ratio;
-
-                            let sib_bary0 = e0_bary_ext.lerp(&e1_bary_ext, Ratio::new(top0, bot));
-                            let sib_bary0 =
-                                sib_bary0.downsample(subdivision_ratio).unwrap_or_else(|| {
-                                    panic!(
-                                        "Failed to downsample sib_bary0 {} by {} | {entity} -> {sibling}",
-                                        sib_bary0, subdivision_ratio
-                                    )
-                                });
-
-                            let sib_bary1 = e0_bary_ext
-                                .lerp(&e1_bary_ext, Ratio::new(top1, bot))
-                                .downsample(subdivision_ratio)
-                                .unwrap();
-
-                            let index0 = sib_bary0.to_mesh_index();
-                            let index1 = sib_bary1.to_mesh_index();
-
-                            if entity.index_u32() == DEBUG_ENTITY {
-                                info!(
-                                    "i {i} / {MESH_STEPS} -> self {self_bary} (idx {self_index}) | sib {sib_bary0} --{r}/{mesh_steps_ratio}-> {sib_bary1} | idx {index0}--{r}/{mesh_steps_ratio}->{index1}"
-                                );
-                            }
-
-                            let vertex0 = positions[index0 as usize];
-                            let vertex1 = positions[index1 as usize];
-                            Vec3A::from_array(vertex0)
-                                .lerp(
-                                    Vec3A::from_array(vertex1),
-                                    r as f32 / mesh_steps_ratio as f32,
-                                )
-                                .to_array()
-                        };
-
-                        mesh_overrides.push((self_index, vertex));
-                    }
-
-                    break;
-                }
-            }
-        }
-
-        // Secondary check to cover corner-edge adjacencies
-        for vertex in triangle.vertices {
-            for sibling in siblings.clone() {
-                let (sibling_triangle, sibling_level, _, _, _) = chunks.get(sibling)?;
-                let subdivision_ratio = (level.0 - sibling_level.0) as u32;
-                let mesh_steps_ratio = 2_u32.pow(subdivision_ratio);
-
-                // Find out where along the sibling this vertex lies, if any
-                // Note we sample on a higher resolution as our corners may lie between mesh
-                // vertices on the sibling
-                let v_bary =
-                    sibling_triangle.cmp_point_bary(vertex, MESH_SUBDIVISIONS + subdivision_ratio);
-
-                if entity.index_u32() == DEBUG_ENTITY {
-                    info!("2nd {entity:?} -> {sibling:?} - {:?}", v_bary);
-                }
-
-                if let Some(v_bary) = v_bary {
-                    // Get bary coords for own vertex
-                    let self_v_bary = triangle
-                        .cmp_point_bary(vertex, MESH_SUBDIVISIONS)
-                        .expect("Own edge should always have a bary");
-
-                    // Get sibling mesh
-                    let mesh = base_mesh_handles.get(sibling).expect("mesh");
-                    let mesh = meshes
-                        .get(mesh.0.id())
-                        .expect("Have a handle, so mesh should exist");
-
-                    let positions = mesh
-                        .attribute(Mesh::ATTRIBUTE_POSITION)
-                        .expect("Mesh should always have positions");
-                    let VertexAttributeValues::Float32x3(positions) = positions else {
-                        panic!("Unexpected data type");
-                    };
-
-                    if let Some(sib_bary) = v_bary.downsample(subdivision_ratio) {
-                        // Vertex lies on a sibling mesh vertex
-                        let self_index = self_v_bary.to_mesh_index();
-                        let sib_index = sib_bary.to_mesh_index();
-                        mesh_overrides.push((self_index, positions[sib_index as usize]));
-                    } else {
-                        // Vertex lies between two sibling mesh vertices
-                        // Find the 2 nearest points on the sibling edge
-                        // Find a sibling corner to use as a direction vector
-                        let [i0, i1] = v_bary
-                            .weights
-                            .to_array()
-                            .iter()
-                            .positions(|d| *d > 0)
-                            .collect_array::<2>()
-                            .expect("Along edge, so must have 2 non-zero bary coords");
-
-                        let mut diff = [0; 3];
-                        diff[i0] = -1;
-                        diff[i1] = 1;
-                        let diff = IVec3::from_array(diff);
-
-                        // Walk along edge until we get valid sibling vertices
-                        let i0_ext_steps = (0..mesh_steps_ratio)
-                            .find(|n| {
-                                v_bary
-                                    .checked_add(-diff * *n as i32)
-                                    .and_then(|b| b.downsample(subdivision_ratio))
-                                    .is_some()
-                            })
-                            .unwrap();
-
-                        let i1_ext_steps = (0..mesh_steps_ratio)
-                            .find(|n| {
-                                v_bary
-                                    .checked_add(diff * *n as i32)
-                                    .and_then(|b| b.downsample(subdivision_ratio))
-                                    .is_some()
-                            })
-                            .unwrap();
-                        let i0_ext = v_bary
-                            .checked_add(-diff * i0_ext_steps as i32)
-                            .and_then(|b| b.downsample(subdivision_ratio))
-                            .unwrap();
-                        let i1_ext = v_bary
-                            .checked_add(diff * i1_ext_steps as i32)
-                            .and_then(|b| b.downsample(subdivision_ratio))
-                            .unwrap();
-
-                        if entity.index_u32() == DEBUG_ENTITY {
-                            info!("diff {:?}", diff);
-                            info!(
-                                "extended v {}  -> {} by {} steps",
-                                v_bary,
-                                i0_ext,
-                                // i0_ext.downsample(subdivision_ratio).unwrap(),
-                                i0_ext_steps,
-                            );
-                            info!(
-                                "extended v {}  -> {} by {} steps",
-                                v_bary,
-                                i1_ext,
-                                // i1_ext.downsample(subdivision_ratio).unwrap(),
-                                i1_ext_steps,
-                            );
-                        }
-
-                        let t = Ratio::new(i0_ext_steps, mesh_steps_ratio);
-
-                        let index0 = i0_ext.to_mesh_index();
-                        let index1 = i1_ext.to_mesh_index();
-                        let self_index = self_v_bary.to_mesh_index();
-
+                        // Interpolate between em
+                        let index0 = sibling_bary0.to_mesh_index();
+                        let index1 = sibling_bary1.to_mesh_index();
+                        let t = Ratio::new(r0, 1 << subdivision_ratio);
                         let vertex0 = Vec3A::from_array(positions[index0 as usize]);
                         let vertex1 = Vec3A::from_array(positions[index1 as usize]);
-                        let new_vertex = vertex0.lerp(vertex1, t.to_f32().unwrap());
-
-                        mesh_overrides.push((self_index, new_vertex.to_array()));
-
-                        break;
+                        let vertex = vertex0.lerp(vertex1, t.to_f32().unwrap());
+                        mesh_overrides.push((self_index, vertex.to_array()));
                     }
+                    _ => unreachable!(
+                        "Point should always land on either a corner or edge of sibling"
+                    ),
                 }
+
+                // Always break as we don't want to double override vertices with higher-res mesh
+                // values, always take the lowest res one
+                break;
             }
         }
 
@@ -807,18 +591,18 @@ fn subdivide_smallest_chunks(
         });
 }
 
-// const LOD_BORDERS: [f32; 5] = [
-//     FRAC_PI_2, // 90+ degrees
-//     FRAC_PI_3, // 60+ degrees
-//     FRAC_PI_4, // 45+ degrees
-//     FRAC_PI_6, // 30+ degrees
-//     FRAC_PI_8, // 22.5+ degrees
-//                // 0+ degrees
-// ]
-// .map(const |x| x / 2.);
+const LOD_BORDERS: [f32; 5] = [
+    FRAC_PI_2, // 90+ degrees
+    FRAC_PI_3, // 60+ degrees
+    FRAC_PI_4, // 45+ degrees
+    FRAC_PI_6, // 30+ degrees
+    FRAC_PI_8, // 22.5+ degrees
+               // 0+ degrees
+]
+.map(const |x| x / 2.);
 
 // Debug - show at all times
-const LOD_BORDERS: [f32; 5] = [PI; _];
+// const LOD_BORDERS: [f32; 5] = [PI; _];
 
 const MAX_LOD_LEVEL: usize = LOD_BORDERS.len() + 1;
 
@@ -1030,9 +814,9 @@ impl Plugin for ChunkPlugin {
             .add_systems(
                 Update,
                 ((
-                    // subdivide_close_chunks, //
+                    subdivide_close_chunks, //
                     toggle_lods,
-                    // adjust_mesh_height,
+                    adjust_mesh_height,
                 )
                     .chain(),),
             )

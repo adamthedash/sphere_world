@@ -8,7 +8,7 @@ use num::ToPrimitive;
 use crate::coordinates::bary_iterative::BaryIterative;
 
 /// Number of times a triangle mesh is subdivided
-pub const MESH_SUBDIVISIONS: u32 = 1;
+pub const MESH_SUBDIVISIONS: u32 = 3;
 /// Number of triangles along one edge of the mesh
 pub const MESH_STEPS: u32 = 1 << MESH_SUBDIVISIONS;
 
@@ -88,12 +88,13 @@ pub fn base_mesh_to_triangle(mut mesh: Mesh, triangle: [Vec3A; 3]) -> Mesh {
     // Walk over bary and convert to cartesian
     for p in positions {
         let b = BaryIterative::from_float_weights(*p, 1., MESH_SUBDIVISIONS);
-        println!("{p:?} -> {b}");
         *p = BaryIterative::from_float_weights(*p, 1., MESH_SUBDIVISIONS)
             .to_cartesian(triangle)
             .to_array();
     }
 
+    // TODO: Normals seem to be inverted for meshes with high subdivisions? i.e. they are dark on
+    // the lit side of the world and vice versa
     mesh.with_computed_normals()
 }
 
