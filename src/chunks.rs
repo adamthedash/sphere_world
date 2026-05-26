@@ -1,12 +1,15 @@
 use std::{
     collections::VecDeque,
     f32::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, FRAC_PI_6, FRAC_PI_8, PI},
+    hash::Hash,
     path::Path,
 };
 
 use bevy::{
-    input::common_conditions::input_just_pressed, mesh::VertexAttributeValues,
-    platform::collections::HashSet, prelude::*,
+    input::common_conditions::input_just_pressed,
+    mesh::VertexAttributeValues,
+    platform::collections::{HashMap, HashSet},
+    prelude::*,
 };
 use glam::{Vec2, Vec3A};
 use hexasphere::shapes::IcoSphere;
@@ -20,10 +23,11 @@ use crate::{
     math::arc_distance,
     mesh::{MESH_STEPS, MESH_SUBDIVISIONS, create_mesh},
     noise::{NoiseChanged, NoiseConfig},
+    player::Player,
     triangle::{Triangle, TriangleTriangleCmp},
 };
 
-const DEBUG_ENTITY: u32 = u32::MAX;
+const DEBUG_ENTITY: u32 = 380;
 
 // ========================================================
 // ECS bits
@@ -56,16 +60,6 @@ impl WorldRoot {
 #[derive(Component)]
 pub struct ChunkPos(pub Vec3A);
 
-#[derive(Component, Debug)]
-pub struct AccTriangle(pub [Vec3A; 3]);
-
-impl AccTriangle {
-    /// Conversion for all of the methods
-    pub fn as_triangle(&self) -> Triangle {
-        Triangle::new(self.0)
-    }
-}
-
 /// Level of subdivision this triangle is part of. Root == 0
 #[derive(Component, Debug)]
 pub struct SubdivisionLevel(usize);
@@ -74,16 +68,19 @@ pub struct SubdivisionLevel(usize);
 #[derive(Component, Debug)]
 pub struct BaseMesh(Mesh3d);
 
+#[derive(Component, Debug)]
+pub struct MeshOverrides(HashMap<usize, Vec3A>);
+
 #[derive(Bundle)]
 pub struct ChunkBundle {
     pub pos: ChunkPos,
     pub triangle: Triangle,
-    pub acc_mesh: Mesh3d,
     pub transform: Transform,
     pub material: MeshMaterial3d<StandardMaterial>,
-    pub acc_triangle: AccTriangle,
     pub subdivision: SubdivisionLevel,
     pub base_mesh: BaseMesh,
+    pub mesh_overrides: MeshOverrides,
+    pub render_mesh: Mesh3d,
 }
 
 #[derive(Component)]
@@ -237,10 +234,10 @@ pub fn subdivide_chunk(
             triangle: t,
             transform: Transform::IDENTITY,
             material: material.clone(),
-            acc_triangle: AccTriangle(t.vertices),
             subdivision: SubdivisionLevel(level.0 + 1),
             base_mesh: BaseMesh(Mesh3d(base_mesh)),
-            acc_mesh: Mesh3d(acc_mesh),
+            mesh_overrides: MeshOverrides(HashMap::new()),
+            render_mesh: Mesh3d(acc_mesh),
         }
     });
 
@@ -340,10 +337,10 @@ fn init_world(
                         triangle,
                         transform: Transform::IDENTITY,
                         material: MeshMaterial3d(assets.hue_material.clone()),
-                        acc_triangle: AccTriangle(triangle.vertices),
                         subdivision: SubdivisionLevel(0),
                         base_mesh: BaseMesh(Mesh3d(base_mesh)),
-                        acc_mesh: Mesh3d(acc_mesh),
+                        mesh_overrides: MeshOverrides(HashMap::new()),
+                        render_mesh: Mesh3d(acc_mesh),
                     },
                     Visibility::Hidden,
                 ))
@@ -367,7 +364,10 @@ fn iter_adjacent(
 ) -> Vec<Entity> {
     let span = info_span!("iter_adjacent").entered();
 
-    let adjacent = adj_ups.get(entity).expect("No adj");
+    let Ok(adjacent) = adj_ups.get(entity) else {
+        // Root nodes won't have this
+        return vec![];
+    };
 
     let enabled = adjacent
         .0
@@ -401,8 +401,8 @@ fn adjust_mesh_height(
     adj_ups: Query<&AdjacentUp>,
 ) -> Result {
     let mut queue = VecDeque::new();
-    // Add all base+1 chunks to the queue, base chunks don't need processing
     for entity in world.root_chunks {
+        // Root chunks don't need to be processed
         let (_, _, children, _, _) = chunks.get(entity)?;
         if let Some(children) = children {
             queue.extend(children.0.clone());
@@ -521,28 +521,43 @@ fn adjust_mesh_height(
         }
 
         // Make copy of base mesh to start with
-        let mut base_vertices = {
+        let mut base_mesh = {
             let base_mesh = base_mesh_handles.get(entity).expect("base_mesh");
             let mesh = meshes
                 .get(base_mesh.0.id())
                 .expect("Have a handle, so mesh should exist");
+            mesh.clone()
+        };
 
-            let positions = mesh
-                .attribute(Mesh::ATTRIBUTE_POSITION)
+        let mut base_vertices = {
+            let positions = base_mesh
+                .attribute_mut(Mesh::ATTRIBUTE_POSITION)
                 .expect("Mesh should always have positions");
             let VertexAttributeValues::Float32x3(positions) = positions else {
                 panic!("Unexpected data type");
             };
 
-            positions.clone()
+            positions
         };
+
+        // let mut base_vertices = {
+        //     let base_mesh = base_mesh_handles.get(entity).expect("base_mesh");
+        //     let mesh = meshes
+        //         .get(base_mesh.0.id())
+        //         .expect("Have a handle, so mesh should exist");
+        //
+        //     let positions = mesh
+        //         .attribute(Mesh::ATTRIBUTE_POSITION)
+        //         .expect("Mesh should always have positions");
+        //     let VertexAttributeValues::Float32x3(positions) = positions else {
+        //         panic!("Unexpected data type");
+        //     };
+        //
+        //     positions.clone()
+        // };
 
         // Apply overrides
         for (i, v) in mesh_overrides {
-            // info!(
-            //     "overriding {i} {:.2?} -> {:.2?}",
-            //     base_vertices[i as usize], v
-            // );
             base_vertices[i as usize] = v;
         }
 
@@ -552,11 +567,15 @@ fn adjust_mesh_height(
             let mut mesh = meshes
                 .get_mut(acc_mesh.id())
                 .expect("Have a handle, so mesh should exist");
+            *mesh = base_mesh;
 
-            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, base_vertices);
+            // mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, base_vertices);
 
             // Recompute normals with new vertices
-            mesh.compute_normals();
+            // mesh.compute_normals();
+
+            // mesh.duplicate_vertices();
+            // mesh.compute_flat_normals();
         }
     }
 
@@ -761,37 +780,13 @@ fn draw_gizmos(
     }
 }
 
-#[derive(Component)]
-struct Player;
-
-fn init_player(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    assets: Res<AssetHandles>,
-) {
-    let mesh = Sphere::new(0.1).mesh().ico(3).unwrap();
-    let mesh = meshes.add(mesh);
-    commands.spawn((
-        Player,
-        Transform::from_translation(Vec3::X * 2.),
-        Mesh3d(mesh),
-        MeshMaterial3d(assets.hue_material.clone()),
-    ));
-}
-
-fn move_player(mut player: Single<&mut Transform, With<Player>>, time: Res<Time>) {
-    let rot = Quat::from_rotation_z(PI * 0.1 * time.delta_secs());
-
-    player.rotate_around(Vec3::ZERO, rot);
-}
-
-const LOD_BORDERS: [f32; 5] = [
+const LOD_BORDERS: [f32; 2] = [
     FRAC_PI_2, // 90+ degrees
-    FRAC_PI_3, // 60+ degrees
+    // FRAC_PI_3, // 60+ degrees
     FRAC_PI_4, // 45+ degrees
-    FRAC_PI_6, // 30+ degrees
-    FRAC_PI_8, // 22.5+ degrees
-               // 0+ degrees
+              // FRAC_PI_6, // 30+ degrees
+              // FRAC_PI_8, // 22.5+ degrees
+              // 0+ degrees
 ]
 .map(const |x| x / 2.);
 
@@ -841,9 +836,6 @@ impl Plugin for ChunkPlugin {
             )
             .add_observer(subdivide_chunk)
             .add_observer(calc_adjacent_chunks)
-            // Rotating moon
-            .add_systems(Startup, init_player)
-            .add_systems(Update, move_player)
             // Debug stuff
             .insert_resource(DrawGizmos(false))
             .add_systems(

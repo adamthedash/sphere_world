@@ -155,7 +155,7 @@ pub fn create_mesh(triangle: [Vec3A; 3], noise_gen: impl NoiseFn<f64, 3>) -> Mes
         assert!(normal.dot(t.vertices[0]) > 0., "Normal not facing outwards");
     }
 
-    mesh
+    mesh.with_computed_normals()
 }
 
 #[cfg(test)]

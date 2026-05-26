@@ -1,12 +1,8 @@
 use std::path::Path;
 
 use bevy::{
-    color::palettes::css::{RED, YELLOW},
     ecs::error::Result,
-    input::{
-        common_conditions::input_just_pressed,
-        mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll},
-    },
+    input::common_conditions::input_just_pressed,
     pbr::wireframe::{WireframeConfig, WireframePlugin},
     prelude::*,
 };
@@ -15,39 +11,12 @@ use glam::Vec3A;
 use hexasphere::shapes::IcoSphere;
 use sphere_world::{
     assets::load_assets,
+    camera::CameraPlugin,
     chunks::ChunkPlugin,
     noise::{NoiseChanged, NoiseConfig, NoiseConfigWidget},
+    player::PlayerPlugin,
+    sun::SunPlugin,
 };
-
-fn drag_camera(
-    mut camera: Single<&mut Transform, With<Camera3d>>,
-    time: Res<Time>,
-    mouse: Res<AccumulatedMouseMotion>,
-) {
-    const SPEED: f32 = 0.3;
-    let r1 = Quat::from_axis_angle(
-        camera.right().as_vec3().normalize(),
-        -mouse.delta.y * time.delta_secs() * SPEED,
-    );
-    let r2 = Quat::from_axis_angle(
-        camera.up().as_vec3().normalize(),
-        -mouse.delta.x * time.delta_secs() * SPEED,
-    );
-    let rot = r2.mul_quat(r1);
-    camera.rotate_around(Vec3::ZERO, rot);
-}
-
-fn zoom_camera(
-    mut camera: Single<&mut Transform, With<Camera3d>>,
-    time: Res<Time>,
-    mouse: Res<AccumulatedMouseScroll>,
-) {
-    const SPEED: f32 = 0.1;
-
-    let direction = camera.translation * -1.;
-    let displacement = direction * mouse.delta.y * time.delta_secs() * SPEED;
-    camera.translation += displacement;
-}
 
 struct SphereData {
     origin: Vec3A,
@@ -86,44 +55,6 @@ fn update_mesh(
     mesh.compute_normals();
 
     should_regen.0 = false;
-}
-
-fn setup(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    // Light
-    let light_transform = Transform::from_xyz(3., 3., 3.);
-    commands.spawn((
-        PointLight {
-            intensity: 100_000.,
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        light_transform,
-    ));
-
-    // Spawn a sun where the light is for visual help
-    let mesh = Sphere::new(0.1).mesh().uv(32, 18);
-    commands.spawn((
-        light_transform,
-        Mesh3d(meshes.add(mesh)),
-        MeshMaterial3d(materials.add(StandardMaterial::from_color(YELLOW))),
-    ));
-
-    // Ambient light
-    commands.insert_resource(GlobalAmbientLight {
-        color: RED.into(),
-        brightness: 10.,
-        ..default()
-    });
-
-    // Camera
-    commands.spawn((
-        Camera3d::default(),
-        Transform::from_xyz(0.0, 4., 4.0).looking_at(Vec3::new(0., 0., 0.), Vec3::Y),
-    ));
 }
 
 fn draw_ui(
@@ -178,8 +109,8 @@ fn main() {
         .add_systems(PreStartup, load_assets)
         // Chunks
         .add_plugins(ChunkPlugin)
-        //
-        .add_systems(Startup, setup)
-        .add_systems(Update, (drag_camera, zoom_camera))
+        .add_plugins(CameraPlugin)
+        .add_plugins(PlayerPlugin)
+        .add_plugins(SunPlugin)
         .run();
 }
