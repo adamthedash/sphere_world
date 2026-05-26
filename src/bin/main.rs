@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use bevy::{
+    color::palettes::css::{RED, YELLOW},
     ecs::error::Result,
     input::{
         common_conditions::input_just_pressed,
@@ -87,18 +88,36 @@ fn update_mesh(
     should_regen.0 = false;
 }
 
-fn setup(mut commands: Commands) {
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
     // Light
+    let light_transform = Transform::from_xyz(3., 3., 3.);
     commands.spawn((
         PointLight {
-            // shadow_maps_enabled: true,
-            intensity: 10_000_000.,
-            range: 100.0,
-            shadow_depth_bias: 0.2,
+            intensity: 100_000.,
+            shadow_maps_enabled: true,
             ..default()
         },
-        Transform::from_xyz(10., 10., 10.),
+        light_transform,
     ));
+
+    // Spawn a sun where the light is for visual help
+    let mesh = Sphere::new(0.1).mesh().uv(32, 18);
+    commands.spawn((
+        light_transform,
+        Mesh3d(meshes.add(mesh)),
+        MeshMaterial3d(materials.add(StandardMaterial::from_color(YELLOW))),
+    ));
+
+    // Ambient light
+    commands.insert_resource(GlobalAmbientLight {
+        color: RED.into(),
+        brightness: 10.,
+        ..default()
+    });
 
     // Camera
     commands.spawn((
@@ -160,10 +179,7 @@ fn main() {
         // Chunks
         .add_plugins(ChunkPlugin)
         //
-        .insert_resource(NoiseConfig::default())
         .add_systems(Startup, setup)
-        .insert_resource(ShouldRegenerateMesh(true))
-        .add_message::<NoiseChanged>()
         .add_systems(Update, (drag_camera, zoom_camera))
         .run();
 }

@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     f32::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, FRAC_PI_6, FRAC_PI_8, PI},
+    path::Path,
 };
 
 use bevy::{
@@ -17,7 +18,8 @@ use crate::{
     assets::AssetHandles,
     coordinates::bary_iterative::BaryIterative,
     math::arc_distance,
-    mesh::{MESH_STEPS, MESH_SUBDIVISIONS, base_mesh_to_triangle, create_bary_mesh},
+    mesh::{MESH_STEPS, MESH_SUBDIVISIONS, create_mesh},
+    noise::{NoiseChanged, NoiseConfig},
     triangle::{Triangle, TriangleTriangleCmp},
 };
 
@@ -209,16 +211,19 @@ pub fn subdivide_chunk(
         &SubdivisionLevel,
     )>,
     mut meshes: ResMut<Assets<Mesh>>,
+    noise_config: Res<NoiseConfig>,
 ) -> Result {
     let (triangle, material, level) = chunks.get(event.0)?;
     let new_triangles = triangle.subdivide();
 
-    // TODO: The base mesh is identical for all chunks. Create once and copy
-    let base_mesh = create_bary_mesh(MESH_SUBDIVISIONS);
+    let noise_gen = noise_config.generator();
 
     let new_bundles = new_triangles.map(|t| {
+        let is_ccw = t.vertices[0].cross(t.vertices[1]).dot(t.vertices[2]) > 0.;
+        assert!(is_ccw);
+
         // Base mesh is the "true" mesh for this chunk. It's created once on chunk creation
-        let base_mesh = base_mesh_to_triangle(base_mesh.clone(), t.vertices);
+        let base_mesh = create_mesh(t.vertices, &noise_gen);
 
         // Acc mesh is the mesh that's rendered. It's a modified version of the base mesh
         // depending on what's happening with ajacent chunks
@@ -265,7 +270,12 @@ pub fn subdivide_chunk(
     Ok(())
 }
 
-fn init_world(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, assets: Res<AssetHandles>) {
+fn init_world(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    assets: Res<AssetHandles>,
+    noise_config: Res<NoiseConfig>,
+) {
     // Base sphere
     let sphere = IcoSphere::new(0, |_| ());
     let vertices = sphere.raw_points();
@@ -301,14 +311,18 @@ fn init_world(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, assets: 
         }
     }
 
-    // TODO: create once and clone
-    let base_mesh = create_bary_mesh(MESH_SUBDIVISIONS);
+    let noise_gen = noise_config.generator();
 
     // Spawn shape
     let chunks = triangles
         .map(|triangle| {
+            let is_ccw = triangle.vertices[0]
+                .cross(triangle.vertices[1])
+                .dot(triangle.vertices[2])
+                > 0.;
+            assert!(is_ccw);
             // Base mesh is the "true" mesh for this chunk. It's created once on chunk creation
-            let base_mesh = base_mesh_to_triangle(base_mesh.clone(), triangle.vertices);
+            let base_mesh = create_mesh(triangle.vertices, &noise_gen);
 
             // Acc mesh is the mesh that's rendered. It's a modified version of the base mesh
             // depending on what's happening with ajacent chunks
@@ -415,8 +429,6 @@ fn adjust_mesh_height(
         }
 
         // Iterate over edges of this mesh and adjust it down to where the adjacent mesh is
-        // TODO: Re-do how this is done. It'll be simpler to iterate around the perimiter of the
-        // mesh, then cmp each one against siblings.
         let mut mesh_overrides = vec![];
         for bary_self in BaryIterative::perimeter(MESH_SUBDIVISIONS) {
             let point = bary_self.to_cartesian(triangle.vertices);
@@ -541,14 +553,7 @@ fn adjust_mesh_height(
                 .get_mut(acc_mesh.id())
                 .expect("Have a handle, so mesh should exist");
 
-            let positions = mesh
-                .attribute_mut(Mesh::ATTRIBUTE_POSITION)
-                .expect("Mesh should always have positions");
-            let VertexAttributeValues::Float32x3(positions) = positions else {
-                panic!("Unexpected data type");
-            };
-
-            *positions = base_vertices;
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, base_vertices);
 
             // Recompute normals with new vertices
             mesh.compute_normals();
@@ -590,21 +595,6 @@ fn subdivide_smallest_chunks(
             commands.trigger(SubdivideChunk(e));
         });
 }
-
-const LOD_BORDERS: [f32; 5] = [
-    FRAC_PI_2, // 90+ degrees
-    FRAC_PI_3, // 60+ degrees
-    FRAC_PI_4, // 45+ degrees
-    FRAC_PI_6, // 30+ degrees
-    FRAC_PI_8, // 22.5+ degrees
-               // 0+ degrees
-]
-.map(const |x| x / 2.);
-
-// Debug - show at all times
-// const LOD_BORDERS: [f32; 5] = [PI; _];
-
-const MAX_LOD_LEVEL: usize = LOD_BORDERS.len() + 1;
 
 fn subdivide_close_chunks(
     mut commands: Commands,
@@ -779,7 +769,7 @@ fn init_player(
     mut meshes: ResMut<Assets<Mesh>>,
     assets: Res<AssetHandles>,
 ) {
-    let mesh = Sphere::new(0.1).mesh().uv(32, 18);
+    let mesh = Sphere::new(0.1).mesh().ico(3).unwrap();
     let mesh = meshes.add(mesh);
     commands.spawn((
         Player,
@@ -795,11 +785,40 @@ fn move_player(mut player: Single<&mut Transform, With<Player>>, time: Res<Time>
     player.rotate_around(Vec3::ZERO, rot);
 }
 
+const LOD_BORDERS: [f32; 5] = [
+    FRAC_PI_2, // 90+ degrees
+    FRAC_PI_3, // 60+ degrees
+    FRAC_PI_4, // 45+ degrees
+    FRAC_PI_6, // 30+ degrees
+    FRAC_PI_8, // 22.5+ degrees
+               // 0+ degrees
+]
+.map(const |x| x / 2.);
+
+// Debug - show at all times
+// const LOD_BORDERS: [f32; 5] = [PI; _];
+
+const MAX_LOD_LEVEL: usize = LOD_BORDERS.len() + 1;
+
 pub struct ChunkPlugin;
 
 impl Plugin for ChunkPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, init_world)
+        app
+            // Noise
+            .insert_resource(NoiseConfig::default())
+            .add_message::<NoiseChanged>()
+            // .insert_resource(ShouldRegenerateMesh(true))
+            .add_systems(
+                Startup,
+                (
+                    |mut noise: ResMut<NoiseConfig>| {
+                        *noise = NoiseConfig::load(Path::new("noise_config.json")).unwrap();
+                    },
+                    init_world,
+                )
+                    .chain(),
+            )
             // Manual systems
             .add_systems(
                 Update,

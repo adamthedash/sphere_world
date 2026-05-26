@@ -1,18 +1,24 @@
+use std::sync::LazyLock;
+
 use bevy::{
     asset::RenderAssetUsages,
     mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
     prelude::*,
 };
+use noise::NoiseFn;
 use num::ToPrimitive;
 
-use crate::coordinates::bary_iterative::BaryIterative;
+use crate::{coordinates::bary_iterative::BaryIterative, math::almost_equal};
 
 /// Number of times a triangle mesh is subdivided
 pub const MESH_SUBDIVISIONS: u32 = 3;
 /// Number of triangles along one edge of the mesh
 pub const MESH_STEPS: u32 = 1 << MESH_SUBDIVISIONS;
 
-pub fn create_bary_mesh(subdivisions: u32) -> Mesh {
+static BASH_MESH: LazyLock<Mesh> = LazyLock::new(|| create_bary_mesh(MESH_SUBDIVISIONS));
+
+/// Create a base mesh where vertices are barycentric weights
+fn create_bary_mesh(subdivisions: u32) -> Mesh {
     const ODD_OFFSETS: [UVec3; 3] = [UVec3::X, UVec3::Y, UVec3::Z];
     const EVEN_OFFSETS: [UVec3; 3] = [
         UVec3::from_array([0, 1, 1]),
@@ -73,11 +79,10 @@ pub fn create_bary_mesh(subdivisions: u32) -> Mesh {
     )
     .with_inserted_indices(Indices::U32(indices))
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vertices)
-    .with_computed_normals()
 }
 
 /// Wrap a base mesh onto the surface of a sphere bounded by the provided triangle
-pub fn base_mesh_to_triangle(mut mesh: Mesh, triangle: [Vec3A; 3]) -> Mesh {
+fn base_mesh_to_triangle(mut mesh: Mesh, triangle: [Vec3A; 3]) -> Mesh {
     let positions = mesh
         .attribute_mut(Mesh::ATTRIBUTE_POSITION)
         .expect("base mesh has vertices");
@@ -87,7 +92,6 @@ pub fn base_mesh_to_triangle(mut mesh: Mesh, triangle: [Vec3A; 3]) -> Mesh {
 
     // Walk over bary and convert to cartesian
     for p in positions {
-        let b = BaryIterative::from_float_weights(*p, 1., MESH_SUBDIVISIONS);
         *p = BaryIterative::from_float_weights(*p, 1., MESH_SUBDIVISIONS)
             .to_cartesian(triangle)
             .to_array();
@@ -96,6 +100,62 @@ pub fn base_mesh_to_triangle(mut mesh: Mesh, triangle: [Vec3A; 3]) -> Mesh {
     // TODO: Normals seem to be inverted for meshes with high subdivisions? i.e. they are dark on
     // the lit side of the world and vice versa
     mesh.with_computed_normals()
+}
+
+/// Takes a mesh on the unit sphere and applies the noise function.
+fn apply_noise_to_mesh(mut mesh: Mesh, noise_gen: impl NoiseFn<f64, 3>) -> Mesh {
+    let positions = mesh
+        .attribute_mut(Mesh::ATTRIBUTE_POSITION)
+        .expect("base mesh has vertices");
+    let VertexAttributeValues::Float32x3(positions) = positions else {
+        unreachable!("Bad vertex type");
+    };
+
+    // Walk over sphere points and apply noise map
+    for p in positions {
+        assert!(almost_equal(Vec3A::from_array(*p).length_squared(), 1.));
+        let height = noise_gen.get(p.map(|v| v as f64)) as f32;
+        assert!((-1.0..=1.).contains(&height), "bad height bounds: {height}");
+        let height = 1. + height / 2.;
+
+        p.iter_mut().for_each(|v| *v *= height);
+    }
+
+    mesh.with_computed_normals()
+}
+
+/// Creates a full mesh with all the bells and whistles
+pub fn create_mesh(triangle: [Vec3A; 3], noise_gen: impl NoiseFn<f64, 3>) -> Mesh {
+    let mut mesh = BASH_MESH.clone();
+
+    let positions = mesh
+        .attribute_mut(Mesh::ATTRIBUTE_POSITION)
+        .expect("base mesh has vertices");
+    let VertexAttributeValues::Float32x3(positions) = positions else {
+        unreachable!("Bad vertex type");
+    };
+
+    for p in positions {
+        // Convert barycentric coords to cartesian
+        let cart = BaryIterative::from_float_weights(*p, 1., MESH_SUBDIVISIONS)
+            .to_cartesian(triangle)
+            .to_array();
+
+        // Apply noise function
+        let height = noise_gen.get(cart.map(|v| v as f64)) as f32;
+        assert!((-1.0..=1.).contains(&height), "bad height bounds: {height}");
+
+        let height = 1. + height / 2.;
+
+        *p = cart.map(|v| v * height);
+    }
+
+    for t in mesh.triangles().unwrap() {
+        let normal = t.normal().unwrap();
+        assert!(normal.dot(t.vertices[0]) > 0., "Normal not facing outwards");
+    }
+
+    mesh
 }
 
 #[cfg(test)]
