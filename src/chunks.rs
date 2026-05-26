@@ -6,6 +6,7 @@ use std::{
 };
 
 use bevy::{
+    color::palettes::css::{BLUE, BROWN, GREEN, WHITE},
     input::common_conditions::input_just_pressed,
     mesh::VertexAttributeValues,
     platform::collections::{HashMap, HashSet},
@@ -538,10 +539,32 @@ fn sitch_meshes(
     Ok(())
 }
 
+#[derive(Resource, Debug)]
+struct TerrainColorScale {
+    sea_level: f32,
+    mountain_start: f32,
+    snow_start: f32,
+}
+
+impl TerrainColorScale {
+    fn sample(&self, height: f32) -> Srgba {
+        if height < self.sea_level {
+            BLUE
+        } else if height < self.mountain_start {
+            GREEN
+        } else if height < self.snow_start {
+            BROWN
+        } else {
+            WHITE
+        }
+    }
+}
+
 /// Push stitching updates to the render meshes
 fn prepare_render_meshes(
     query: Query<(&BaseMesh, &MeshOverrides, &Mesh3d), Changed<MeshOverrides>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    terrain_color: Res<TerrainColorScale>,
 ) -> Result {
     for (base_mesh, overrides, render_mesh) in query {
         // Make copy of base mesh to start with
@@ -560,6 +583,17 @@ fn prepare_render_meshes(
         for (i, v) in overrides.0.iter() {
             vertices[*i as usize] = *v;
         }
+
+        // Re-calculate colours
+        let colours = vertices
+            .iter()
+            .map(|v| {
+                let height = Vec3A::from_array(*v).length();
+                terrain_color.sample(height).to_f32_array()
+            })
+            .collect::<Vec<_>>();
+
+        base_mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colours);
 
         // Duplicate vertices so we can do per-face normals
         base_mesh.duplicate_vertices();
@@ -794,6 +828,11 @@ impl Plugin for ChunkPlugin {
         app
             // Noise
             .insert_resource(NoiseConfig::default())
+            .insert_resource(TerrainColorScale {
+                sea_level: 1.,
+                mountain_start: 1.1,
+                snow_start: 1.2,
+            })
             .add_message::<NoiseChanged>()
             // .insert_resource(ShouldRegenerateMesh(true))
             .add_systems(
