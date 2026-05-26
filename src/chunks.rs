@@ -69,7 +69,7 @@ pub struct SubdivisionLevel(usize);
 pub struct BaseMesh(Mesh3d);
 
 #[derive(Component, Debug)]
-pub struct MeshOverrides(HashMap<usize, Vec3A>);
+pub struct MeshOverrides(HashMap<u32, [f32; 3]>);
 
 #[derive(Bundle)]
 pub struct ChunkBundle {
@@ -385,11 +385,12 @@ fn iter_adjacent(
     enabled
 }
 
-fn adjust_mesh_height(
+/// Adjust height of vertices along mesh edges so they join seamlessly with their neighbours
+fn sitch_meshes(
     world: Res<WorldRoot>,
-    acc_mesh_handles: Query<&Mesh3d>,
+    mut base_mesh_overrides: Query<&mut MeshOverrides>,
     base_mesh_handles: Query<&BaseMesh>,
-    mut meshes: ResMut<Assets<Mesh>>,
+    meshes: Res<Assets<Mesh>>,
     chunks: Query<(
         &Triangle,
         &SubdivisionLevel,
@@ -450,15 +451,27 @@ fn adjust_mesh_height(
 
                 // Get sibling mesh - use non-base mesh as we want to include adjustments for
                 // siblings processed in previous loops of this function
-                let mesh = acc_mesh_handles.get(sibling).expect("mesh");
-                let mesh = meshes
-                    .get(mesh.0.id())
-                    .expect("Have a handle, so mesh should exist");
-                let positions = mesh
-                    .attribute(Mesh::ATTRIBUTE_POSITION)
-                    .expect("Mesh should always have positions");
-                let VertexAttributeValues::Float32x3(positions) = positions else {
-                    panic!("Unexpected data type");
+                let sibling_mesh_vertices = {
+                    let mesh = base_mesh_handles.get(sibling)?;
+                    let positions = meshes
+                        .get(mesh.0.id())
+                        .expect("Have a handle, so mesh should exist")
+                        .attribute(Mesh::ATTRIBUTE_POSITION)
+                        .expect("Mesh should always have positions");
+                    let VertexAttributeValues::Float32x3(positions) = positions else {
+                        panic!("Unexpected data type");
+                    };
+                    positions
+                };
+
+                let sibling_mesh_overrides = &base_mesh_overrides.get(sibling)?.0;
+                let get_sibling_vertex = |i: u32| {
+                    // Prioritize an override if there is one
+                    if let Some(v) = sibling_mesh_overrides.get(&i) {
+                        return *v;
+                    }
+
+                    sibling_mesh_vertices[i as usize]
                 };
 
                 let nonzero_axes = sibling_bary
@@ -475,7 +488,7 @@ fn adjust_mesh_height(
                             .downsample(subdivision_ratio)
                             .expect("Corners should downsample cleanly");
                         let sibling_index = sibling_bary.to_mesh_index();
-                        mesh_overrides.push((self_index, positions[sibling_index as usize]));
+                        mesh_overrides.push((self_index, get_sibling_vertex(sibling_index)));
                     }
                     [i0, i1] => {
                         // Somewhere along an edge
@@ -500,8 +513,8 @@ fn adjust_mesh_height(
                         let index0 = sibling_bary0.to_mesh_index();
                         let index1 = sibling_bary1.to_mesh_index();
                         let t = Ratio::new(r0, 1 << subdivision_ratio);
-                        let vertex0 = Vec3A::from_array(positions[index0 as usize]);
-                        let vertex1 = Vec3A::from_array(positions[index1 as usize]);
+                        let vertex0 = Vec3A::from_array(get_sibling_vertex(index0));
+                        let vertex1 = Vec3A::from_array(get_sibling_vertex(index1));
                         let vertex = vertex0.lerp(vertex1, t.to_f32().unwrap());
                         mesh_overrides.push((self_index, vertex.to_array()));
                     }
@@ -516,67 +529,46 @@ fn adjust_mesh_height(
             }
         }
 
-        if !mesh_overrides.is_empty() && entity.index_u32() == DEBUG_ENTITY {
-            info!("overrides: {:.2?}\n", mesh_overrides);
-        }
+        // Update mesh overrides
+        let mut overrides = base_mesh_overrides.get_mut(entity)?;
+        overrides.0.clear();
+        overrides.0.extend(mesh_overrides.into_iter());
+    }
 
+    Ok(())
+}
+
+/// Push stitching updates to the render meshes
+fn prepare_render_meshes(
+    query: Query<(&BaseMesh, &MeshOverrides, &Mesh3d), Changed<MeshOverrides>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) -> Result {
+    for (base_mesh, overrides, render_mesh) in query {
         // Make copy of base mesh to start with
-        let mut base_mesh = {
-            let base_mesh = base_mesh_handles.get(entity).expect("base_mesh");
-            let mesh = meshes
-                .get(base_mesh.0.id())
-                .expect("Have a handle, so mesh should exist");
-            mesh.clone()
-        };
-
-        let mut base_vertices = {
-            let positions = base_mesh
-                .attribute_mut(Mesh::ATTRIBUTE_POSITION)
-                .expect("Mesh should always have positions");
-            let VertexAttributeValues::Float32x3(positions) = positions else {
-                panic!("Unexpected data type");
-            };
-
-            positions
-        };
-
-        // let mut base_vertices = {
-        //     let base_mesh = base_mesh_handles.get(entity).expect("base_mesh");
-        //     let mesh = meshes
-        //         .get(base_mesh.0.id())
-        //         .expect("Have a handle, so mesh should exist");
-        //
-        //     let positions = mesh
-        //         .attribute(Mesh::ATTRIBUTE_POSITION)
-        //         .expect("Mesh should always have positions");
-        //     let VertexAttributeValues::Float32x3(positions) = positions else {
-        //         panic!("Unexpected data type");
-        //     };
-        //
-        //     positions.clone()
-        // };
+        let mut base_mesh = meshes
+            .get(base_mesh.0.id())
+            .expect("Have handle, so mesh should exist.")
+            .clone();
 
         // Apply overrides
-        for (i, v) in mesh_overrides {
-            base_vertices[i as usize] = v;
+        let vertices = base_mesh
+            .attribute_mut(Mesh::ATTRIBUTE_POSITION)
+            .expect("Mesh should always have positions");
+        let VertexAttributeValues::Float32x3(vertices) = vertices else {
+            panic!("Unexpected data type");
+        };
+        for (i, v) in overrides.0.iter() {
+            vertices[*i as usize] = *v;
         }
 
-        // Update acc mesh
-        let acc_mesh = acc_mesh_handles.get(entity).expect("acc_mesh");
-        {
-            let mut mesh = meshes
-                .get_mut(acc_mesh.id())
-                .expect("Have a handle, so mesh should exist");
-            *mesh = base_mesh;
+        // Duplicate vertices so we can do per-face normals
+        base_mesh.duplicate_vertices();
+        base_mesh.compute_flat_normals();
 
-            // mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, base_vertices);
-
-            // Recompute normals with new vertices
-            // mesh.compute_normals();
-
-            // mesh.duplicate_vertices();
-            // mesh.compute_flat_normals();
-        }
+        // Update render mesh
+        *meshes
+            .get_mut(render_mesh.id())
+            .expect("Have handle, so mesh should exist.") = base_mesh;
     }
 
     Ok(())
@@ -821,7 +813,7 @@ impl Plugin for ChunkPlugin {
                     subdivide_random_chunks.run_if(input_just_pressed(KeyCode::Space)),
                     // subdivide_smallest_chunks.run_if(input_just_pressed(KeyCode::Space)),
                     // subdivide_close_chunks.run_if(input_just_pressed(KeyCode::Space)),
-                    adjust_mesh_height.run_if(input_just_pressed(KeyCode::KeyL)),
+                    sitch_meshes.run_if(input_just_pressed(KeyCode::KeyL)),
                 ),
             )
             // Automagic LOD stuff
@@ -830,7 +822,8 @@ impl Plugin for ChunkPlugin {
                 ((
                     subdivide_close_chunks, //
                     toggle_lods,
-                    adjust_mesh_height,
+                    sitch_meshes,
+                    prepare_render_meshes,
                 )
                     .chain(),),
             )

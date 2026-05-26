@@ -28,7 +28,11 @@ pub fn init_sun(
     commands.spawn((
         transform,
         Mesh3d(meshes.add(mesh)),
-        MeshMaterial3d(materials.add(StandardMaterial::from_color(YELLOW))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: YELLOW.into(),
+            emissive: YELLOW.into(),
+            ..default()
+        })),
         Sun,
     ));
 
