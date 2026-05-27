@@ -1,7 +1,7 @@
 use std::f32::consts::PI;
 
 use bevy::{
-    color::palettes::css::{RED, YELLOW},
+    color::palettes::css::{RED, WHITE, YELLOW},
     prelude::*,
 };
 
@@ -17,7 +17,7 @@ pub fn init_sun(
     let transform = Transform::from_xyz(3., 3., 3.);
     commands.spawn((
         PointLight {
-            intensity: 100_000.,
+            intensity: 1_000_000.,
             shadow_maps_enabled: true,
             ..default()
         },
@@ -38,8 +38,8 @@ pub fn init_sun(
 
     // Ambient light
     commands.insert_resource(GlobalAmbientLight {
-        color: RED.into(),
-        brightness: 10.,
+        color: WHITE.into(),
+        brightness: 50.,
         ..default()
     });
 }

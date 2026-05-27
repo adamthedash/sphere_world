@@ -11,7 +11,7 @@ use num::ToPrimitive;
 use crate::{coordinates::bary_iterative::BaryIterative, math::almost_equal};
 
 /// Number of times a triangle mesh is subdivided
-pub const MESH_SUBDIVISIONS: u32 = 3;
+pub const MESH_SUBDIVISIONS: u32 = 2;
 /// Number of triangles along one edge of the mesh
 pub const MESH_STEPS: u32 = 1 << MESH_SUBDIVISIONS;
 

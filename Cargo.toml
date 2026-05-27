@@ -3,6 +3,8 @@ name = "sphere_world"
 version = "0.1.0"
 edition = "2024"
 
+default-run = "main"
+
 [dependencies]
 bevy = {git = "https://github.com/bevyengine/bevy.git", features= ["dynamic_linking"]}
 

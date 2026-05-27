@@ -806,13 +806,13 @@ fn draw_gizmos(
     }
 }
 
-const LOD_BORDERS: [f32; 2] = [
+const LOD_BORDERS: [f32; 5] = [
     FRAC_PI_2, // 90+ degrees
-    // FRAC_PI_3, // 60+ degrees
+    FRAC_PI_3, // 60+ degrees
     FRAC_PI_4, // 45+ degrees
-              // FRAC_PI_6, // 30+ degrees
-              // FRAC_PI_8, // 22.5+ degrees
-              // 0+ degrees
+    FRAC_PI_6, // 30+ degrees
+    FRAC_PI_8, // 22.5+ degrees
+               // 0+ degrees
 ]
 .map(const |x| x / 2.);
 
