@@ -127,7 +127,7 @@ fn gui(mut commands: Commands) {
                 }
                 Children [
                     (
-                        :FeathersButton
+                        @FeathersButton
                         Children [ Text("Save") ThemedText ]
                         on(|_: On<Activate>, config: Res<NoiseConfig>| {
                             config.save(Path::new("noise_config.json")).unwrap();
@@ -135,7 +135,7 @@ fn gui(mut commands: Commands) {
                         })
                     ),
                     (
-                        :FeathersButton
+                        @FeathersButton
                         Children [ Text("Load") ThemedText ]
                         on(|_: On<Activate>, mut config: ResMut<NoiseConfig>| {
                             *config = NoiseConfig::load(Path::new("noise_config.json")).unwrap();
@@ -155,8 +155,8 @@ fn gui(mut commands: Commands) {
                         Text("Global input scale")
                     ),
                     (
-                        :FeathersSlider {
-                            @min: -5.,
+                        @FeathersSlider {
+                            @min: {-5_f32},
                             @max: 5.,
                         }
                         SliderStep(0.1)
@@ -170,8 +170,8 @@ fn gui(mut commands: Commands) {
                         Text("Global output scale")
                     ),
                     (
-                        :FeathersSlider {
-                            @min: -5.,
+                        @FeathersSlider {
+                            @min: {-5_f32},
                             @max: 5.,
                         }
                         SliderStep(0.1)
@@ -201,8 +201,8 @@ fn octave_slider(index: usize) -> impl Scene {
                 Text("Input scale")
             ),
             (
-                :FeathersSlider {
-                    @min: -5.,
+                @FeathersSlider {
+                    @min: {-5_f32},
                     @max: 5.,
                 }
                 SliderStep(0.1)
