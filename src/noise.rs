@@ -85,7 +85,7 @@ impl NoiseConfig {
         let noise = AddMany::new(octaves);
 
         // Global settings
-        ScaleBias::new(ScalePoint::new(noise).set_scale(self.output_scale))
+        ScalePoint::new(ScaleBias::new(noise).set_scale(self.output_scale))
             .set_scale(self.input_scale)
     }
 }

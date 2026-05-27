@@ -103,7 +103,7 @@ fn base_mesh_to_triangle(mut mesh: Mesh, triangle: [Vec3A; 3]) -> Mesh {
 }
 
 /// Takes a mesh on the unit sphere and applies the noise function.
-fn apply_noise_to_mesh(mut mesh: Mesh, noise_gen: impl NoiseFn<f64, 3>) -> Mesh {
+pub fn apply_noise_to_mesh(mut mesh: Mesh, noise_gen: impl NoiseFn<f64, 3>) -> Mesh {
     let positions = mesh
         .attribute_mut(Mesh::ATTRIBUTE_POSITION)
         .expect("base mesh has vertices");
@@ -115,8 +115,7 @@ fn apply_noise_to_mesh(mut mesh: Mesh, noise_gen: impl NoiseFn<f64, 3>) -> Mesh 
     for p in positions {
         assert!(almost_equal(Vec3A::from_array(*p).length_squared(), 1.));
         let height = noise_gen.get(p.map(|v| v as f64)) as f32;
-        assert!((-1.0..=1.).contains(&height), "bad height bounds: {height}");
-        let height = 1. + height / 2.;
+        let height = (1. + height / 2.).clamp(0.1, f32::MAX);
 
         p.iter_mut().for_each(|v| *v *= height);
     }
@@ -143,9 +142,7 @@ pub fn create_mesh(triangle: [Vec3A; 3], noise_gen: impl NoiseFn<f64, 3>) -> Mes
 
         // Apply noise function
         let height = noise_gen.get(cart.map(|v| v as f64)) as f32;
-        assert!((-1.0..=1.).contains(&height), "bad height bounds: {height}");
-
-        let height = 1. + height / 2.;
+        let height = (1. + height / 2.).clamp(0.1, f32::MAX);
 
         *p = cart.map(|v| v * height);
     }

@@ -67,7 +67,7 @@ pub struct SubdivisionLevel(usize);
 
 /// "Base" mesh before any stitching
 #[derive(Component, Debug)]
-pub struct BaseMesh(Mesh3d);
+pub struct BaseMesh(pub Mesh3d);
 
 #[derive(Component, Debug)]
 pub struct MeshOverrides(HashMap<u32, [f32; 3]>);
@@ -540,14 +540,14 @@ fn sitch_meshes(
 }
 
 #[derive(Resource, Debug)]
-struct TerrainColorScale {
-    sea_level: f32,
-    mountain_start: f32,
-    snow_start: f32,
+pub struct TerrainColorScale {
+    pub sea_level: f32,
+    pub mountain_start: f32,
+    pub snow_start: f32,
 }
 
 impl TerrainColorScale {
-    fn sample(&self, height: f32) -> Srgba {
+    pub fn sample(&self, height: f32) -> Srgba {
         if height < self.sea_level {
             BLUE
         } else if height < self.mountain_start {
