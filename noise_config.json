@@ -1,18 +1,30 @@
 {
   "octaves": [
     {
-      "output_scale": 12.041973979288535,
-      "input_scale": 0.00808800721751076
+      "output_scale": 1.0,
+      "input_scale": 0.5
     },
     {
-      "output_scale": 0.9330329915368074,
-      "input_scale": 1.0
+      "output_scale": 0.5,
+      "input_scale": 1.0717734636432956
     },
     {
-      "output_scale": 2.0420242514143867,
-      "input_scale": 3.1383363915870026
+      "output_scale": 0.5,
+      "input_scale": 2.143546960496664
+    },
+    {
+      "output_scale": 0.3535533905932738,
+      "input_scale": 3.7321319044703287
+    },
+    {
+      "output_scale": 0.15389304658166714,
+      "input_scale": 6.062865865263917
+    },
+    {
+      "output_scale": 0.14358729912045276,
+      "input_scale": 12.996038771242667
     }
   ],
   "input_scale": 1.0,
-  "output_scale": 13.928808552365322
+  "output_scale": 0.3535533905932738
 }

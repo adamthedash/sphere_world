@@ -2,3 +2,4 @@
 trace-*
 perf*
 scratchpad/
+src/bin/bsn_min_repro.rs

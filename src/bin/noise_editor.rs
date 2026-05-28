@@ -14,7 +14,10 @@ use bevy::{
     mesh::{Indices, PrimitiveTopology, VertexAttributeValues},
     pbr::wireframe::{WireframeConfig, WireframePlugin},
     prelude::*,
-    ui_widgets::{Activate, SliderPrecision, SliderStep, ValueChange, slider_self_update},
+    ui_widgets::{
+        Activate, SetSliderValue, SliderPrecision, SliderStep, SliderValue, ValueChange,
+        slider_self_update,
+    },
 };
 use hexasphere::shapes::IcoSphere;
 use sphere_world::{
@@ -22,7 +25,7 @@ use sphere_world::{
     camera::CameraPlugin,
     chunks::{BaseMesh, TerrainColorScale},
     mesh::apply_noise_to_mesh,
-    noise::{NoiseChanged, NoiseConfig},
+    noise::{NoiseChanged, NoiseConfig, NoiseOctave},
     sun::SunPlugin,
 };
 
@@ -80,7 +83,7 @@ fn init_world(
     noise_config: Res<NoiseConfig>,
 ) {
     // Base sphere
-    let sphere = IcoSphere::new(20, |_| ());
+    let sphere = IcoSphere::new(30, |_| ());
     let vertices = sphere.raw_points();
 
     // Create base mesh - unit sphere
@@ -108,6 +111,11 @@ fn init_world(
         Planet,
     ));
 }
+
+#[derive(Component, Default, Clone)]
+struct ScaleSection;
+#[derive(Component, Default, Clone)]
+struct NumOctavesSlider;
 
 fn gui(mut commands: Commands) {
     let left_panel = bsn! {
@@ -144,16 +152,16 @@ fn gui(mut commands: Commands) {
                     ),
                 ]
             ),
+            // Scales
             (
                 Node {
                     align_items: AlignItems::Stretch,
                     justify_content: JustifyContent::Center,
                     flex_direction: FlexDirection::Column,
                 }
+                ScaleSection
                 Children [
-                    (
-                        Text("Global input scale")
-                    ),
+                    Text("Global input scale"),
                     (
                         @FeathersSlider {
                             @min: {-5_f32},
@@ -165,10 +173,9 @@ fn gui(mut commands: Commands) {
                         on(|change: On<ValueChange<f32>>, mut config: ResMut<NoiseConfig>|{
                             config.input_scale = 2_f64.powf(change.value as f64);
                         })
+                        ScaleType::Input
                     )
-                    (
-                        Text("Global output scale")
-                    ),
+                    Text("Global output scale"),
                     (
                         @FeathersSlider {
                             @min: {-5_f32},
@@ -180,6 +187,23 @@ fn gui(mut commands: Commands) {
                         on(|change: On<ValueChange<f32>>, mut config: ResMut<NoiseConfig>|{
                             config.output_scale = 2_f64.powf(change.value as f64);
                         })
+                        ScaleType::Out
+                    )
+                    Text("# Octaves"),
+                    (
+                        @FeathersSlider {
+                            @min: 1.,
+                            @max: 8.,
+                        }
+                        SliderStep(1.)
+                        SliderPrecision(0)
+                        NumOctavesSlider
+                        on(move |change: On<ValueChange<f32>>, mut config: ResMut<NoiseConfig>|{
+                            let value = change.value as usize;
+                            if config.octaves.len() != value {
+                                config.resize_octaves(value);
+                            }
+                        })
                     )
                 ]
             ),
@@ -189,17 +213,31 @@ fn gui(mut commands: Commands) {
     commands.spawn_scene(left_panel);
 }
 
-fn octave_slider(index: usize) -> impl Scene {
+#[derive(Component, Clone, Default)]
+struct OctaveIndex(usize);
+
+#[derive(Component, Clone, Default, FromTemplate)]
+enum ScaleType {
+    #[default]
+    Input,
+    Out,
+}
+
+#[derive(Component, Clone, Default)]
+struct OctaveSection;
+
+fn octave_slider(index: usize, input_val: f32, output_val: f32) -> impl Scene {
     bsn! {
         Node {
             align_items: AlignItems::Stretch,
             justify_content: JustifyContent::Center,
             flex_direction: FlexDirection::Column,
         }
+        OctaveIndex(index)
+        OctaveSection
         Children [
-            (
-                Text("Input scale")
-            ),
+            Text({ format!("=== Octave {index} ===") }),
+            Text("Input scale"),
             (
                 @FeathersSlider {
                     @min: {-5_f32},
@@ -207,12 +245,94 @@ fn octave_slider(index: usize) -> impl Scene {
                 }
                 SliderStep(0.1)
                 SliderPrecision(1)
-                on(slider_self_update)
-                on(|change: On<ValueChange<f32>>, mut config: ResMut<NoiseConfig>|{
-                    config.input_scale = 2_f64.powf(change.value as f64);
+                SliderValue(input_val)
+                on(move |change: On<ValueChange<f32>>, mut config: ResMut<NoiseConfig>|{
+                    config.octaves[index].input_scale = 2_f64.powf(change.value as f64);
                 })
+                OctaveIndex(index)
+                ScaleType::Input
+            )
+            Text("Output scale"),
+            (
+                @FeathersSlider {
+                    @min: {-5_f32},
+                    @max: 5.,
+                }
+                SliderValue(output_val)
+                SliderStep(0.1)
+                SliderPrecision(1)
+                on(move |change: On<ValueChange<f32>>, mut config: ResMut<NoiseConfig>|{
+                    config.octaves[index].output_scale = 2_f64.powf(change.value as f64);
+                })
+                OctaveIndex(index)
+                ScaleType::Out
             )
         ]
+    }
+}
+
+/// Update slider values when config changes
+fn update_gui(
+    config: Res<NoiseConfig>,
+    scale_sliders: Query<(Entity, Option<&OctaveIndex>, &ScaleType)>,
+    octave_sections: Query<(Entity, &OctaveIndex), With<OctaveSection>>,
+    scale_section: Single<Entity, With<ScaleSection>>,
+    num_octaves_slider: Single<Entity, With<NumOctavesSlider>>,
+    mut commands: Commands,
+) {
+    // Update number of octave sections
+    for (entity, index) in octave_sections {
+        if index.0 >= config.octaves.len() {
+            // Despawn section if # octaves has shrunk
+            info!("despawning octave {} {}", index.0, entity);
+            commands.entity(entity).despawn();
+            continue;
+        }
+    }
+
+    // Spawn some new sections if # octaves has increased
+    for (index, octave) in config
+        .octaves
+        .iter()
+        .enumerate()
+        .skip(octave_sections.count())
+    {
+        info!("spawning octave {}", index);
+        let slider = octave_slider(index, octave.input_scale as f32, octave.output_scale as f32);
+        commands.spawn_scene(slider).insert(ChildOf(*scale_section));
+    }
+
+    // Update slider
+    commands
+        .entity(*num_octaves_slider)
+        .insert(SliderValue(config.octaves.len() as f32));
+
+    // Scale sliders
+    for (entity, index, value) in scale_sliders {
+        let new_value = if let Some(index) = index {
+            if index.0 >= config.octaves.len() {
+                // This slider has been removed above, but changes not yet propagated to world
+                continue;
+            }
+
+            match value {
+                ScaleType::Input => config.octaves[index.0].input_scale,
+                ScaleType::Out => config.octaves[index.0].output_scale,
+            }
+        } else {
+            match value {
+                ScaleType::Input => config.input_scale,
+                ScaleType::Out => config.output_scale,
+            }
+        };
+
+        let new_value = new_value.log2();
+
+        // Insert new component rather than using `SetSliderValue` event as we don't want to
+        // re-trigger things that happen when the user moves the slider
+        commands
+            .entity(entity)
+            .insert(SliderValue(new_value as f32));
     }
 }
 
@@ -249,6 +369,7 @@ fn main() {
         .add_plugins(FeathersPlugins)
         .insert_resource(UiTheme(create_dark_theme()))
         .add_systems(Startup, gui)
+        .add_systems(Update, update_gui.run_if(resource_changed::<NoiseConfig>))
         // Others
         .add_plugins(SunPlugin)
         .add_systems(PreStartup, load_assets)

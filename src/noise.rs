@@ -61,6 +61,15 @@ impl NoiseConfig {
 
         Ok(config)
     }
+
+    pub fn resize_octaves(&mut self, count: usize) {
+        while self.octaves.len() < count {
+            self.octaves.push(NoiseOctave::default());
+        }
+        while self.octaves.len() > count {
+            self.octaves.pop();
+        }
+    }
 }
 
 impl NoiseConfig {
@@ -69,7 +78,8 @@ impl NoiseConfig {
 
         let simplex = Simplex::new(SEED);
 
-        let total_octave_scale = self.octaves.iter().map(|o| o.output_scale).sum::<f64>();
+        // let total_octave_scale = self.octaves.iter().map(|o| o.output_scale).sum::<f64>();
+        let total_octave_scale = 1.;
 
         // Per-octave settings
         let octaves = self
