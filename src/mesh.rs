@@ -81,27 +81,6 @@ fn create_bary_mesh(subdivisions: u32) -> Mesh {
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vertices)
 }
 
-/// Wrap a base mesh onto the surface of a sphere bounded by the provided triangle
-fn base_mesh_to_triangle(mut mesh: Mesh, triangle: [Vec3A; 3]) -> Mesh {
-    let positions = mesh
-        .attribute_mut(Mesh::ATTRIBUTE_POSITION)
-        .expect("base mesh has vertices");
-    let VertexAttributeValues::Float32x3(positions) = positions else {
-        unreachable!("Bad vertex type");
-    };
-
-    // Walk over bary and convert to cartesian
-    for p in positions {
-        *p = BaryIterative::from_float_weights(*p, 1., MESH_SUBDIVISIONS)
-            .to_cartesian(triangle)
-            .to_array();
-    }
-
-    // TODO: Normals seem to be inverted for meshes with high subdivisions? i.e. they are dark on
-    // the lit side of the world and vice versa
-    mesh.with_computed_normals()
-}
-
 /// Takes a mesh on the unit sphere and applies the noise function.
 pub fn apply_noise_to_mesh(mut mesh: Mesh, noise_gen: impl NoiseFn<f64, 3>) -> Mesh {
     let positions = mesh
@@ -153,75 +132,4 @@ pub fn create_mesh(triangle: [Vec3A; 3], noise_gen: impl NoiseFn<f64, 3>) -> Mes
     }
 
     mesh.with_computed_normals()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::f32::consts::{FRAC_PI_4, PI};
-
-    use bevy::mesh::{Mesh, VertexAttributeValues};
-    use glam::Vec3A;
-
-    use crate::{
-        mesh::{base_mesh_to_triangle, create_bary_mesh},
-        triangle::Triangle,
-    };
-
-    #[test]
-    fn test_mesh() {
-        fn get_vertices(mesh: &Mesh) -> &[[f32; 3]] {
-            let positions = mesh
-                .attribute(Mesh::ATTRIBUTE_POSITION)
-                .expect("base mesh has vertices");
-            let VertexAttributeValues::Float32x3(positions) = positions else {
-                unreachable!("Bad vertex type");
-            };
-
-            positions
-        }
-
-        fn print_mesh(mesh: &Mesh) {
-            let positions = get_vertices(mesh);
-
-            for (i, p) in positions.iter().enumerate() {
-                println!("{i} {p:.2?}");
-            }
-
-            let indices = mesh.indices().unwrap();
-            indices.iter().array_chunks::<3>().for_each(|triangle| {
-                println!("{triangle:?}");
-            });
-        }
-
-        let mesh = create_bary_mesh(1);
-        print_mesh(&mesh);
-        println!();
-        assert_eq!(
-            get_vertices(&mesh),
-            &[
-                [0., 1., 0.],
-                [0.5, 0.5, 0.],
-                [1., 0., 0.,],
-                [0., 0.5, 0.5],
-                [0.5, 0., 0.5],
-                [0., 0., 1.],
-            ]
-        );
-
-        let triangle = Triangle::new([Vec3A::X, Vec3A::Y, Vec3A::Z]);
-        let mesh = base_mesh_to_triangle(mesh, triangle.vertices);
-        print_mesh(&mesh);
-        let x = FRAC_PI_4.sin();
-        assert_eq!(
-            get_vertices(&mesh),
-            &[
-                [0., 1., 0.],
-                [x, x, 0.],
-                [1., 0., 0.,],
-                [0., x, x],
-                [x, 0., x],
-                [0., 0., 1.],
-            ]
-        );
-    }
 }

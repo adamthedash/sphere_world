@@ -1,7 +1,7 @@
 use std::f32::consts::PI;
 
 use bevy::{
-    color::palettes::css::{RED, WHITE, YELLOW},
+    color::palettes::css::{WHITE, YELLOW},
     prelude::*,
 };
 

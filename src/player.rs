@@ -8,11 +8,6 @@ use crate::assets::AssetHandles;
 #[derive(Component)]
 pub struct Player;
 
-/// Metres / second
-const PLAYER_SPEED: f32 = 0.1;
-/// Metres
-const PLAYER_HEIGHT: f32 = 0.1;
-
 /// Random point on unit sphere
 fn random_unit_vector() -> Vec3 {
     let rng = rand::rngs::SmallRng::seed_from_u64(42);

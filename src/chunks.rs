@@ -1,7 +1,6 @@
 use std::{
     collections::VecDeque,
-    f32::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, FRAC_PI_6, FRAC_PI_8, PI},
-    hash::Hash,
+    f32::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, FRAC_PI_6, FRAC_PI_8},
     path::Path,
 };
 
@@ -23,7 +22,7 @@ use crate::{
     assets::AssetHandles,
     coordinates::bary_iterative::BaryIterative,
     math::arc_distance,
-    mesh::{MESH_STEPS, MESH_SUBDIVISIONS, create_mesh},
+    mesh::{MESH_SUBDIVISIONS, create_mesh},
     noise::{NoiseChanged, NoiseConfig},
     player::Player,
     triangle::{Triangle, TriangleTriangleCmp},
@@ -388,6 +387,7 @@ fn iter_adjacent(
 }
 
 /// Adjust height of vertices along mesh edges so they join seamlessly with their neighbours
+#[allow(clippy::type_complexity)]
 fn sitch_meshes(
     world: Res<WorldRoot>,
     mut base_mesh_overrides: Query<&mut MeshOverrides>,
@@ -534,7 +534,7 @@ fn sitch_meshes(
         // Update mesh overrides
         let mut overrides = base_mesh_overrides.get_mut(entity)?;
         overrides.0.clear();
-        overrides.0.extend(mesh_overrides.into_iter());
+        overrides.0.extend(mesh_overrides);
     }
 
     Ok(())
@@ -643,6 +643,7 @@ fn subdivide_random_chunks(
         });
 }
 
+#[allow(dead_code)]
 fn subdivide_smallest_chunks(
     mut commands: Commands,
     chunks: Query<(Entity, &SubdivisionLevel), Without<ChildrenChunks>>,
