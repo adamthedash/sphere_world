@@ -11,7 +11,6 @@ use glam::Vec3A;
 use hexasphere::shapes::IcoSphere;
 use sphere_world::{
     assets::load_assets,
-    camera::CameraPlugin,
     chunks::ChunkPlugin,
     noise::{NoiseChanged, NoiseConfig, NoiseConfigWidget},
     player::PlayerPlugin,
@@ -65,7 +64,7 @@ fn draw_ui(
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
 
-    egui::SidePanel::right("side_panel").show(ctx, |ui| {
+    egui::Panel::right("side_panel").show(ctx, |ui| {
         let mut num_subdivisions = 1;
         ui.add(Slider::new(&mut num_subdivisions, 1..=20).text("# Subdivisions"));
 
@@ -109,7 +108,6 @@ fn main() {
         .add_systems(PreStartup, load_assets)
         // Chunks
         .add_plugins(ChunkPlugin)
-        .add_plugins(CameraPlugin)
         .add_plugins(PlayerPlugin)
         .add_plugins(SunPlugin)
         .run();

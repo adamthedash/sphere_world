@@ -5,10 +5,10 @@
 #![feature(const_closures)]
 #![feature(const_array)]
 pub mod assets;
-pub mod camera;
 pub mod chunks;
 pub mod coordinates;
 pub mod drag_value;
+pub mod editor;
 pub mod math;
 pub mod mesh;
 pub mod noise;

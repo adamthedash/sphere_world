@@ -17,6 +17,7 @@ use hexasphere::shapes::IcoSphere;
 use itertools::Itertools;
 use num::{Integer, ToPrimitive, rational::Ratio};
 use rand::{SeedableRng, seq::IteratorRandom};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     assets::AssetHandles,
@@ -539,7 +540,7 @@ fn sitch_meshes(
     Ok(())
 }
 
-#[derive(Resource, Debug)]
+#[derive(Resource, Debug, Serialize, Deserialize)]
 pub struct TerrainColorScale {
     pub sea_level: f32,
     pub mountain_start: f32,
@@ -557,6 +558,23 @@ impl TerrainColorScale {
         } else {
             WHITE
         }
+    }
+
+    pub fn save(&self, path: &Path) -> Result {
+        let dir = path.parent().ok_or("No parent")?;
+        std::fs::create_dir_all(dir)?;
+
+        let file = std::fs::File::create(path)?;
+        serde_json::to_writer_pretty(file, self)?;
+
+        Ok(())
+    }
+
+    pub fn load(path: &Path) -> Result<Self> {
+        let file = std::fs::File::open_buffered(path)?;
+        let config = serde_json::from_reader(file)?;
+
+        Ok(config)
     }
 }
 
@@ -817,7 +835,7 @@ const LOD_BORDERS: [f32; 5] = [
 .map(const |x| x / 2.);
 
 // Debug - show at all times
-// const LOD_BORDERS: [f32; 5] = [PI; _];
+// const LOD_BORDERS: [f32; 3] = [PI; _];
 
 const MAX_LOD_LEVEL: usize = LOD_BORDERS.len() + 1;
 
@@ -829,9 +847,9 @@ impl Plugin for ChunkPlugin {
             // Noise
             .insert_resource(NoiseConfig::default())
             .insert_resource(TerrainColorScale {
-                sea_level: 1.,
-                mountain_start: 1.1,
-                snow_start: 1.2,
+                sea_level: 0.97,
+                mountain_start: 1.05,
+                snow_start: 1.1,
             })
             .add_message::<NoiseChanged>()
             // .insert_resource(ShouldRegenerateMesh(true))

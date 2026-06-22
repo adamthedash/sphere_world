@@ -9,6 +9,9 @@ default-run = "main"
 bevy = {version = "0.19", features= ["dynamic_linking", "bevy_feathers"]}
 
 bevy_egui = "0.40"
+bevy_enhanced_input = "0.26"
+
+
 env_logger = "0.11"
 glam = "0.32"
 hexasphere = "18.0"

@@ -22,8 +22,8 @@ use bevy::{
 use hexasphere::shapes::IcoSphere;
 use sphere_world::{
     assets::{AssetHandles, load_assets},
-    camera::CameraPlugin,
     chunks::{BaseMesh, TerrainColorScale},
+    editor::camera::CameraPlugin,
     mesh::apply_noise_to_mesh,
     noise::{NoiseChanged, NoiseConfig, NoiseOctave},
     sun::SunPlugin,
@@ -158,6 +158,7 @@ fn gui(mut commands: Commands) {
                     align_items: AlignItems::Stretch,
                     justify_content: JustifyContent::Center,
                     flex_direction: FlexDirection::Column,
+                    overflow: Overflow::scroll_y(),
                 }
                 ScaleSection
                 Children [
@@ -284,7 +285,6 @@ fn update_gui(
     for (entity, index) in octave_sections {
         if index.0 >= config.octaves.len() {
             // Despawn section if # octaves has shrunk
-            info!("despawning octave {} {}", index.0, entity);
             commands.entity(entity).despawn();
             continue;
         }
@@ -297,8 +297,11 @@ fn update_gui(
         .enumerate()
         .skip(octave_sections.count())
     {
-        info!("spawning octave {}", index);
-        let slider = octave_slider(index, octave.input_scale as f32, octave.output_scale as f32);
+        let slider = octave_slider(
+            index,
+            octave.input_scale.log2() as f32,
+            octave.output_scale.log2() as f32,
+        );
         commands.spawn_scene(slider).insert(ChildOf(*scale_section));
     }
 
