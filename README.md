@@ -1,3 +1,3 @@
 A prototype for a chunking & mesh LOD system for spherical planets.  
 
-[Demo video](./github/orb.webm)
+[Demo video](https://www.youtube.com/watch?v=skbQ91Ssd6g)
